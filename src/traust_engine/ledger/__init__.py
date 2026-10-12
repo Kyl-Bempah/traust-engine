@@ -67,6 +67,7 @@ from traust_ledger.api.reports import (
 )
 
 from traust_engine.ledger.service import (
+    LayerBinding,
     LedgerClient,
     LedgerError,
     LedgerService,
@@ -97,6 +98,7 @@ __all__ = [  # noqa: RUF022
     # Service + SDK
     "LedgerClient",
     "LedgerError",
+    "LayerBinding",
     "LedgerService",
     "Severity",
     "SubmitResult",

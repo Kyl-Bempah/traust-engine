@@ -2,6 +2,42 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.20.0]
+
+## Changes
+
+- **`LedgerService` database mode.** With `LAAS_BACKEND_TYPE=db` and
+  `LAAS_DATABASE_URL`, the Ledger database is the authority: the run is bound to
+  one layer (`TRAUST_LEDGER_LAYER_ID` and/or `TRAUST_LEDGER_PRODUCT_REPO_ID`, an
+  explicit ID must belong to the owner), every read and write goes to it, and
+  the layer file becomes a read-only snapshot re-exported after each read and
+  write. Countersigns written to the database out of band (e.g. from SCI) are
+  visible to the next read. Database mode never creates a layer and never
+  falls back to the file; a missing URL or binding fails the call.
+- **Database-mode guards.** One service binds one layer *and* one snapshot
+  path; a second path is refused instead of reading or writing the bound
+  layer under another repo's name. Each snapshot carries a read-only
+  `<layer>.snapshot` marker (layer ID, Merkle root/size, export time), and
+  file mode refuses to write or initialize a marked file, so a process that
+  lost the database environment cannot fork the ledger on disk. An unchanged
+  snapshot is not rewritten (mtime and git status stay meaningful). If a
+  committed write's snapshot refresh fails, the stale snapshot is removed
+  and the call does not raise. A missing layer says who creates it. Binding
+  and export are logged (`traust_engine.ledger.service`, INFO; never the DSN).
+- `LedgerService.write_snapshot`, `LedgerService.layer_id_for`,
+  `LedgerOps.pull`, and `LayerBinding` (exported from `traust_engine.ledger`).
+- File mode is unchanged and now pins `backend_type="file"`, so a stray
+  environment cannot switch backends silently.
+- **Migration always imports layers into the Ledger.** `migrate_cli` imports
+  selected layer artifacts into `traust_ledger` in the same migration database
+  after artifact reconciliation (SQLite file or the PostgreSQL DSN); layers are
+  never routed to artifact storage. `--layer-destination`,
+  `--ledger-target-url-env` and their config keys are removed, `make migrate-*`
+  installs the `ledger-migration` extra, and local `migration.yaml` is
+  gitignored.
+- Pins traust-ledger 0.11.0 (`get_layer`/`find_layer`, traust-ledger#82) and
+  traust-contracts 0.52.0, both from `traust-security`.
+
 ## [0.19.3]
 
 ## Changes
