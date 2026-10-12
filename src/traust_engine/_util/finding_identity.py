@@ -433,7 +433,7 @@ def rebaseline(
         from traust_engine.ledger import LedgerService
 
         layer_path.write_text(json.dumps(layer, indent=2) + "\n", encoding="utf-8")
-        svc = ledger_service or LedgerService()
+        svc = ledger_service or LedgerService(data_dir=layer_path.parent)
         svc.sign(layer_path)
     result["queued_reviews"] = queued
     return result

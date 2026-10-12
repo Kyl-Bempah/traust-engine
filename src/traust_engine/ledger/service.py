@@ -12,16 +12,19 @@ Pure computation (fingerprint, compute_event_id, derive_disposition) stays
 importable directly from traust_engine.ledger — those are stateless
 algorithms that don't need a service boundary.
 
-Two modes, decided by the caller (``LedgerOps`` from ``HarnessContext.ledger``),
-never by environment variables:
+Everything comes from the injected context (``HarnessContext.ledger``, i.e.
+``ledger.yaml``) through :class:`ClientSettings`, never from environment
+variables: every ``LedgerClient`` argument is passed explicitly, so the Ledger
+SDK's ``LAAS_*`` / ``LEDGER_*`` fallbacks never apply. The one exception is the
+caller's token (``ledger auth login``, a token file or ``LAAS_TOKEN``) — a
+credential of the caller, not deployment config.
 
-* **File mode** (``LedgerService(data_dir=…)``): the layer file beside the audit
-  *is* the ledger, addressed by its filename stem. Local workflow.
-* **Database mode** (``LedgerService.database(dsn, binding)``): the Ledger
-  database is the authority. The service is bound to one layer (a
-  :class:`LayerBinding` the caller passes), every read and write goes to that
-  layer, and the layer file becomes a read-only *snapshot* re-exported after each
-  read or write. Nothing falls back to the file.
+* **File mode** (no ``dsn``): the layer file beside the audit *is* the ledger,
+  addressed by its filename stem.
+* **Database mode** (``dsn`` set): the Ledger database is the authority. The
+  service is bound to one layer (a :class:`LayerBinding` the caller passes),
+  every read and write goes to that layer, and the layer file is a read-only
+  *snapshot* re-exported after each read or write. Nothing falls back to the file.
 """
 
 from __future__ import annotations
@@ -36,9 +39,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from traust_contracts.config import LedgerConfig
+from traust_contracts.config import LedgerConfig, LedgerIdentity, LedgerSigning
 from traust_contracts.v1.models.layer import LayerActor
 from traust_ledger.api import reports
+from traust_ledger.auth.directory import (
+    DIRECTORY_COMMAND_ENV,
+    EmployeeDirectory,
+    load_directory,
+)
+from traust_ledger.auth.discovery import discover_oidc
+from traust_ledger.auth.verifier import TokenVerifier, VerifierConfig
 from traust_ledger.client import LedgerClient, LedgerError, SigningConfig
 
 logger = logging.getLogger(__name__)
@@ -77,58 +87,76 @@ class LayerBinding:
         return self.layer_id or str(owned)
 
 
-#: Secret-only environment the Ledger signer still reads when ledger.yaml configures
-#: signing: an ambient keyless token is a runner credential, never a config value.
-_SIGNING_TOKEN_ENV = ("LAAS_SIGNING_OIDC_TOKEN", "HARNESS_SIGNING_OIDC_TOKEN")
+@dataclass(frozen=True)
+class ClientSettings:
+    """Every ``LedgerClient`` argument, resolved once from ``ledger.yaml``.
 
-
-def client_options(ledger: LedgerConfig | None) -> dict[str, Any]:
-    """``LedgerClient`` arguments from ``ledger.yaml``'s ``signing`` and ``identity``.
-
-    Explicit arguments win over the Ledger's own ``LAAS_SIGNING_*`` /
-    ``LEDGER_OIDC_*`` / ``LEDGER_DIRECTORY_COMMAND`` environment fallbacks, so a
-    configured value cannot be overridden from the environment. An unconfigured
-    part keeps the Ledger's defaults. Secrets (the caller's ledger token, a
-    keypair password, an ambient keyless signing token) are never config.
+    Unconfigured parts get explicit defaults (no signing requirement, a keypair
+    signer without a key, no directory, the Ledger's own token verification)
+    rather than the SDK's environment fallbacks.
     """
-    if ledger is None:
-        return {}
-    options: dict[str, Any] = {}
-    if (signing := ledger.signing) is not None:
-        options["signing_config"] = SigningConfig(
-            method=signing.method,
-            key_path=signing.key_path,
-            oidc_issuer=signing.oidc_issuer,
-            oidc_client_id=signing.oidc_client_id,
-            expected_identity=signing.expected_identity,
-            oidc_token=next((os.environ[n] for n in _SIGNING_TOKEN_ENV if n in os.environ), None),
-            ca_url=signing.ca_url,
-            tlog_url=signing.tlog_url,
+
+    signing_config: SigningConfig
+    signing_required: bool
+    directory: EmployeeDirectory | bool
+    verifier: TokenVerifier | None
+    dsn: str | None
+
+    @classmethod
+    def from_config(cls, ledger: LedgerConfig | None) -> ClientSettings:
+        signing = (ledger.signing if ledger else None) or LedgerSigning()
+        identity = (ledger.identity if ledger else None) or LedgerIdentity()
+        return cls(
+            signing_config=SigningConfig(
+                method=signing.method,
+                key_path=signing.key_path,
+                oidc_issuer=signing.oidc_issuer,
+                oidc_client_id=signing.oidc_client_id,
+                expected_identity=signing.expected_identity,
+                ca_url=signing.ca_url,
+                tlog_url=signing.tlog_url,
+            ),
+            signing_required=signing.required,
+            directory=(
+                load_directory({DIRECTORY_COMMAND_ENV: identity.directory_command})
+                if identity.directory_command
+                else False
+            ),
+            verifier=_verifier(identity),
+            dsn=ledger.dsn if ledger else None,
         )
-        options["signing_required"] = signing.required
-    if (identity := ledger.identity) is not None:
-        if identity.jwks_url or identity.oidc_issuer:
-            from traust_ledger.auth.verifier import TokenVerifier, VerifierConfig
 
-            jwks_url = identity.jwks_url
-            if jwks_url is None:
-                from traust_ledger.auth.discovery import discover_oidc
+    @property
+    def database(self) -> bool:
+        return self.dsn is not None
 
-                jwks_url = discover_oidc(str(identity.oidc_issuer)).jwks_uri
-            options["verifier"] = TokenVerifier(
-                VerifierConfig(
-                    jwks_url=jwks_url,
-                    issuer=identity.oidc_issuer,
-                    audience=identity.oidc_audience,
-                )
+    def client(self, *, data_dir: Path | None = None) -> LedgerClient:
+        """A ``LedgerClient`` with every argument explicit (database when ``dsn`` is set)."""
+        common: dict[str, Any] = {
+            "signing_config": self.signing_config,
+            "signing_required": self.signing_required,
+            "directory": self.directory,
+            "verifier": self.verifier,
+        }
+        if self.dsn is not None:
+            return LedgerClient(
+                backend_type=BACKEND_DB, database_url=ledger_database_url(self.dsn), **common
             )
-        if identity.directory_command:
-            from traust_ledger.auth.directory import DIRECTORY_COMMAND_ENV, load_directory
+        if data_dir is None:
+            raise LedgerError("file mode needs the layer's directory (data_dir)")
+        return LedgerClient(backend_type=BACKEND_FILE, data_dir=str(data_dir), **common)
 
-            options["directory"] = load_directory(
-                {DIRECTORY_COMMAND_ENV: identity.directory_command}
-            )
-    return options
+
+def _verifier(identity: LedgerIdentity) -> TokenVerifier | None:
+    """Token verifier for a configured OIDC provider; None keeps the Ledger's own."""
+    if not (identity.jwks_url or identity.oidc_issuer):
+        return None
+    jwks_url = identity.jwks_url or discover_oidc(str(identity.oidc_issuer)).jwks_uri
+    return TokenVerifier(
+        VerifierConfig(
+            jwks_url=jwks_url, issuer=identity.oidc_issuer, audience=identity.oidc_audience
+        )
+    )
 
 
 def ledger_database_url(dsn: str) -> str:
@@ -175,13 +203,13 @@ class SubmitResult:
 class LedgerService:
     """Stateful gateway to traust-ledger operations.
 
-    Delegates to ``LedgerClient`` for all authenticated ledger I/O.
-    Signing configuration is read from environment by LedgerClient
-    (LAAS_SIGNING_*, HARNESS_SIGNING_*) — callers never supply credentials.
+    Delegates to ``LedgerClient`` for all authenticated ledger I/O. Build it with
+    ``engine.ledger.service(…)``, which takes the mode, signing and identity from
+    the injected context; the constructors below are what that uses.
 
-    Usage (prefer ``engine.ledger.service(…)``, which picks the mode from config):
-        ledger = LedgerService(data_dir=Path("/data"))          # file mode
-        ledger = LedgerService.database(ctx.ledger, LayerBinding(…))  # database mode
+    Usage:
+        ledger = engine.ledger.service(layer_path.parent)   # file mode
+        ledger = engine.ledger.service(layer=binding)        # ledger.yaml dsn set
 
         ledger.submit_events(layer_path, events)
         result = ledger.query_findings(layer_path)
@@ -196,16 +224,13 @@ class LedgerService:
         client: LedgerClient | None = None,
         *,
         data_dir: Path | None = None,
+        settings: ClientSettings | None = None,
         binding: LayerBinding | None = None,
-        ledger: LedgerConfig | None = None,
     ):
-        """File mode, unless an explicit *client* comes with a *binding* (database mode).
+        """File mode under *data_dir*, or an injected *client* (with *binding*: database).
 
-        *ledger* (``ctx.ledger``) supplies signing and identity; see
-        :func:`client_options`.
-
-        The backend is always pinned explicitly so ``LAAS_BACKEND_TYPE`` in the
-        environment cannot switch modes behind the caller's back.
+        *settings* defaults to :meth:`ClientSettings.from_config` with no
+        ``ledger.yaml``: explicit defaults, never environment fallbacks.
         """
         self._binding = binding
         self._bound_id: str | None = None
@@ -216,28 +241,18 @@ class LedgerService:
             return
         if binding is not None:
             raise LedgerError("a layer binding needs a database client; use LedgerService.database")
+        settings = settings or ClientSettings.from_config(None)
+        if settings.database:
+            raise LedgerError("ledger.yaml sets a dsn: use LedgerService.database with a binding")
         self._database = False
-        # LedgerClient resolves SigningConfig.from_env() internally when no
-        # signing_config is passed — no need to import or forward it here.
-        options = client_options(ledger)
-        if data_dir is not None:
-            self._client = LedgerClient(
-                backend_type=BACKEND_FILE, data_dir=str(data_dir), **options
-            )
-        else:
-            self._client = LedgerClient(backend_type=BACKEND_FILE, **options)
+        self._client = settings.client(data_dir=data_dir)
 
     @classmethod
-    def database(cls, ledger: LedgerConfig, binding: LayerBinding) -> LedgerService:
-        """Database mode on ``ledger.dsn`` (``ledger.yaml``), bound to one layer."""
-        if ledger.dsn is None:
+    def database(cls, settings: ClientSettings, binding: LayerBinding) -> LedgerService:
+        """Database mode on the configured ``dsn``, bound to one layer."""
+        if not settings.database:
             raise LedgerError("database mode needs ledger.yaml dsn")
-        client = LedgerClient(
-            backend_type=BACKEND_DB,
-            database_url=ledger_database_url(ledger.dsn),
-            **client_options(ledger),
-        )
-        return cls(client=client, binding=binding)
+        return cls(client=settings.client(), binding=binding)
 
     @property
     def database_mode(self) -> bool:
@@ -630,13 +645,13 @@ class LedgerService:
 
 
 __all__ = [
+    "ClientSettings",
     "LayerBinding",
     "LedgerClient",
     "LedgerError",
     "LedgerService",
     "SubmitResult",
     "VerifyResult",
-    "client_options",
     "ledger_database_url",
     "snapshot_marker",
 ]

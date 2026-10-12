@@ -8,13 +8,14 @@ otherwise layer files are the ledger.
 
 from __future__ import annotations
 
+from functools import cached_property
 from pathlib import Path
 
 from traust_ledger.client import LedgerError
 
 from traust_engine import locations
 from traust_engine._ops_base import ContextOps
-from traust_engine.ledger.service import LayerBinding, LedgerService
+from traust_engine.ledger.service import ClientSettings, LayerBinding, LedgerService
 
 
 class LedgerOps(ContextOps):
@@ -34,10 +35,15 @@ class LedgerOps(ContextOps):
     def signing_pubkey(self) -> Path | None:
         return self._ctx.signing_pubkey
 
+    @cached_property
+    def settings(self) -> ClientSettings:
+        """Ledger client settings from ``ledger.yaml``, resolved once per context."""
+        return ClientSettings.from_config(self._ctx.ledger)
+
     @property
     def database_configured(self) -> bool:
         """True when ``ledger.yaml`` sets ``dsn``: the Ledger database is the authority."""
-        return self._ctx.ledger is not None and self._ctx.ledger.database
+        return self.settings.database
 
     def _default_data_dir(self) -> Path | None:
         ar = locations.analysis_results_dir(self._loc)
@@ -50,27 +56,30 @@ class LedgerOps(ContextOps):
     ) -> LedgerService:
         """Return a :class:`LedgerService` for this deployment.
 
-        *layer* defaults to the run binding from :meth:`bind`.
-        With ``ledger.yaml`` configured, a layer is required and the service works
-        on that database layer (``data_dir`` is unused). Without it, the service is
-        file mode under *data_dir* — defaulting to ``locations.analysis_results``,
-        else ``locations.workspace`` — and a *layer* binding is an error, since there
-        is no database to bind to.
+        *layer* defaults to the run binding from :meth:`bind`. With ``ledger.yaml``
+        ``dsn`` set, a layer is required and the service works on that database
+        layer (*data_dir* is unused). Otherwise the service is file mode under
+        *data_dir* — defaulting to ``locations.analysis_results``, else
+        ``locations.workspace`` — and a layer binding is an error, since there is
+        no database to bind to.
         """
-        ledger = self._ctx.ledger
         layer = layer or self._run_layer
-        if ledger is not None and ledger.dsn is not None:
+        if self.settings.database:
             if layer is None:
                 raise LedgerError(
-                    "ledger.yaml is configured: pass the run's layer binding "
-                    "(layer_id or product_repo_id); the database ledger is never "
-                    "addressed by file name"
+                    "ledger.yaml sets a dsn: pass the run's layer binding (layer_id or "
+                    "product_repo_id); the database ledger is never addressed by file name"
                 )
-            return LedgerService.database(ledger, layer)
+            return LedgerService.database(self.settings, layer)
         if layer is not None:
             raise LedgerError("a layer binding was given but ledger.yaml sets no dsn")
         resolved = data_dir if data_dir is not None else self._default_data_dir()
-        return LedgerService(data_dir=resolved, ledger=ledger)
+        if resolved is None:
+            raise LedgerError(
+                "no layer directory: pass the layer's directory or set "
+                "locations.analysis_results / locations.workspace"
+            )
+        return LedgerService(data_dir=resolved, settings=self.settings)
 
     def pull(self, layer_path: Path, layer: LayerBinding | None = None) -> dict:
         """Export the bound database layer to *layer_path* as the session snapshot."""

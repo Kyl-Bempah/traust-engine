@@ -40,7 +40,7 @@ dev = ["fsspec>=2024.2", "pytest>=9.1.1", "ruff>=0.6", "vulture>=2.16"]
 
 [tool.uv.sources]
 traust-contracts = { git = "https://github.com/traust-security/traust-contracts.git", rev = "a1d602b4266be4f8645c1c682d8c3439501167ad" }
-traust-ledger = { git = "https://github.com/traust-security/traust-ledger.git", rev = "7d99728aae755fb379c76c917819298539e0ec1f" }
+traust-ledger = { git = "https://github.com/traust-security/traust-ledger.git", rev = "a20ffd476529e50b2e266e3311adbf48d6a8f5f6" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/traust_engine"]

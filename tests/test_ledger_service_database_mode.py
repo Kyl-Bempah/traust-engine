@@ -351,32 +351,40 @@ def test_binding_and_snapshot_are_logged(ledger_db, tmp_path, caplog) -> None:
 # ─── signing and identity from ledger.yaml ───────────────────────────────────
 
 
-def test_no_ledger_config_keeps_ledger_defaults() -> None:
-    from traust_engine.ledger.service import client_options
+def test_without_ledger_yaml_the_environment_is_ignored(monkeypatch, tmp_path) -> None:
+    """No ledger.yaml means explicit defaults, not the Ledger SDK's env fallbacks."""
+    from traust_engine.ledger import ClientSettings
 
-    assert client_options(None) == {}
+    monkeypatch.setenv("LAAS_SIGNING_REQUIRED", "1")
+    monkeypatch.setenv("LAAS_SIGNING_KEY_PATH", "/env/other.key")
+    monkeypatch.setenv("LEDGER_DIRECTORY_COMMAND", "/nonexistent/directory")
+    settings = ClientSettings.from_config(None)
+    assert settings.signing_required is False
+    assert settings.signing_config.key_path is None
+    assert settings.directory is False
+    assert settings.verifier is None and not settings.database
+    client = LedgerService(data_dir=tmp_path, settings=settings)._client
+    assert client._config.signing_required is False
 
 
 def test_signing_config_comes_from_ledger_yaml_not_env(monkeypatch, tmp_path) -> None:
     from traust_contracts.config import LedgerConfig, LedgerSigning
 
-    from traust_engine.ledger.service import client_options
+    from traust_engine.ledger import ClientSettings
 
     monkeypatch.setenv("LAAS_SIGNING_METHOD", "identity")
     monkeypatch.setenv("LAAS_SIGNING_KEY_PATH", "/env/other.key")
     monkeypatch.setenv("LAAS_SIGNING_REQUIRED", "0")
-    monkeypatch.setenv("LAAS_SIGNING_OIDC_TOKEN", "ambient-token")
     ledger = LedgerConfig(
         signing=LedgerSigning(required=True, method="keypair", key_path="/run/cosign.key")
     )
-    options = client_options(ledger)
-    signing = options["signing_config"]
+    settings = ClientSettings.from_config(ledger)
+    signing = settings.signing_config
     assert (signing.method, signing.key_path) == ("keypair", "/run/cosign.key")
-    assert options["signing_required"] is True
-    assert signing.oidc_token == "ambient-token"  # secrets still come from the runner
-
-    client = LedgerService(data_dir=tmp_path, ledger=ledger)._client
-    assert client._config.signing_required is True  # env LAAS_SIGNING_REQUIRED=0 lost
+    assert signing.oidc_token is None  # never read from the environment
+    assert settings.signing_required is True
+    client = LedgerService(data_dir=tmp_path, settings=settings)._client
+    assert client._config.signing_required is True
 
 
 def test_identity_config_builds_verifier_and_directory() -> None:
@@ -384,9 +392,9 @@ def test_identity_config_builds_verifier_and_directory() -> None:
     from traust_ledger.auth.directory import DirectoryUnavailableError, ScriptDirectory
     from traust_ledger.auth.verifier import TokenVerifier
 
-    from traust_engine.ledger.service import client_options
+    from traust_engine.ledger import ClientSettings
 
-    options = client_options(
+    settings = ClientSettings.from_config(
         LedgerConfig(
             identity=LedgerIdentity(
                 oidc_issuer="https://issuer.example",
@@ -396,24 +404,36 @@ def test_identity_config_builds_verifier_and_directory() -> None:
             )
         )
     )
-    assert isinstance(options["verifier"], TokenVerifier)
-    assert options["verifier"]._config.audience == "laas-api"
-    assert isinstance(options["directory"], ScriptDirectory)
+    assert isinstance(settings.verifier, TokenVerifier)
+    assert settings.verifier._config.audience == "laas-api"
+    assert isinstance(settings.directory, ScriptDirectory)
 
     with pytest.raises(DirectoryUnavailableError):  # fail closed on a missing program
-        client_options(
+        ClientSettings.from_config(
             LedgerConfig(identity=LedgerIdentity(directory_command="/nonexistent/directory"))
         )
 
 
-def test_database_mode_uses_the_same_signing(ledger_db) -> None:
+def test_database_mode_uses_the_same_settings(ledger_db) -> None:
     from traust_contracts.config import LedgerConfig, LedgerSigning
 
+    from traust_engine.ledger import ClientSettings
+
     url, owner, _ = ledger_db
-    ledger = LedgerConfig(dsn=url, signing=LedgerSigning(method="keypair"))
-    svc = LedgerService.database(ledger, LayerBinding(product_repo_id=owner))
+    settings = ClientSettings.from_config(
+        LedgerConfig(dsn=url, signing=LedgerSigning(method="keypair"))
+    )
+    svc = LedgerService.database(settings, LayerBinding(product_repo_id=owner))
     assert svc.database_mode
     assert svc._client._config.signing_required is False
+    with pytest.raises(LedgerError, match=r"use LedgerService\.database"):
+        LedgerService(data_dir=Path("/tmp"), settings=settings)
+
+
+def test_settings_are_resolved_once_per_context(ledger_db) -> None:
+    url, _, _ = ledger_db
+    ops = _ops(url)
+    assert ops.settings is ops.settings
 
 
 def test_run_binding_applies_to_later_service_calls(ledger_db, tmp_path) -> None:

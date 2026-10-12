@@ -13,7 +13,7 @@ Two tiers:
 Usage:
     from traust_engine.ledger import LedgerService, fingerprint, compute_event_id
 
-    ledger = LedgerService()
+    ledger = engine.ledger.service(layer_path.parent)   # mode/signing from context
     ledger.submit_events(layer_path, events)
     result = ledger.verify(layer_path)
 
@@ -67,6 +67,7 @@ from traust_ledger.api.reports import (
 )
 
 from traust_engine.ledger.service import (
+    ClientSettings,
     LayerBinding,
     LedgerClient,
     LedgerError,
@@ -98,6 +99,7 @@ __all__ = [  # noqa: RUF022
     # Service + SDK
     "LedgerClient",
     "LedgerError",
+    "ClientSettings",
     "LayerBinding",
     "LedgerService",
     "Severity",
