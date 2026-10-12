@@ -8,10 +8,8 @@
 results-root: ./results-example # --results-root  (findings to import)
 config: ./corpus-config.yaml # --config        (deployment config: trees/scope)
 output: ./migration-output # --output        (base dir; plan/ and run/ subdirs)
-layer-destination: ledger # --layer-destination (ledger | storage)
-# Optional: import selected layers into the same database after artifact reconciliation.
-# Install with `uv sync --extra ledger-migration`; omit to export a Ledger manifest only.
-# ledger-target-url-env: LAAS_MIGRATION_TARGET_URL # SQLAlchemy URL in an env var
+# Layer artifacts are imported into traust_ledger in the database below, after
+# artifact reconciliation. There is no separate layer destination or database.
 
 # Where the data is taken — the destination database. `type` picks the shape;
 # supply the connection info for that type.

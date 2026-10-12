@@ -11,18 +11,100 @@ is atomic (mutate + stamp + sign inside one lock).
 Pure computation (fingerprint, compute_event_id, derive_disposition) stays
 importable directly from traust_engine.ledger — those are stateless
 algorithms that don't need a service boundary.
+
+Two modes, chosen once from the environment:
+
+* **File mode** (default): the layer file beside the audit *is* the ledger,
+  addressed by its filename stem. Unchanged local workflow.
+* **Database mode** (``LAAS_BACKEND_TYPE=db`` + ``LAAS_DATABASE_URL``): the
+  Ledger database is the authority. The run is bound to one layer
+  (``TRAUST_LEDGER_LAYER_ID`` and/or ``TRAUST_LEDGER_PRODUCT_REPO_ID``), every
+  read and write goes to that layer, and the layer file becomes a read-only
+  *snapshot* re-exported after each read or write. LLM sessions only ever see
+  that file; only the script step holds ledger credentials. Nothing falls back
+  to the file when database mode is configured.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
+import os
+import tempfile
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from traust_contracts.v1.models.layer import LayerActor
 from traust_ledger.api import reports
 from traust_ledger.client import LedgerClient, LedgerError
+
+logger = logging.getLogger(__name__)
+
+SNAPSHOT_MARKER_SUFFIX = ".snapshot"
+ENV_BACKEND_TYPE = "LAAS_BACKEND_TYPE"
+ENV_DATABASE_URL = "LAAS_DATABASE_URL"
+ENV_LAYER_ID = "TRAUST_LEDGER_LAYER_ID"
+ENV_PRODUCT_REPO_ID = "TRAUST_LEDGER_PRODUCT_REPO_ID"
+BACKEND_DB = "db"
+
+
+@dataclass(frozen=True)
+class LayerBinding:
+    """The one database layer a run reads and writes. Never derived from a path."""
+
+    layer_id: str | None = None
+    product_repo_id: str | None = None
+
+    @classmethod
+    def from_env(cls) -> LayerBinding:
+        return cls(
+            layer_id=os.environ.get(ENV_LAYER_ID) or None,
+            product_repo_id=os.environ.get(ENV_PRODUCT_REPO_ID) or None,
+        )
+
+    def resolve(self, client: LedgerClient) -> str:
+        """The bound layer ID; an explicit ID must belong to the bound owner."""
+        if not self.layer_id and not self.product_repo_id:
+            raise LedgerError(
+                f"database mode needs a layer binding: set {ENV_LAYER_ID} or {ENV_PRODUCT_REPO_ID}"
+            )
+        owned = client.find_layer(self.product_repo_id) if self.product_repo_id else None
+        if self.product_repo_id and owned is None:
+            raise LedgerError(
+                f"product_repo {self.product_repo_id!r} has no ledger layer; database mode "
+                "never creates layers — initialize one for this product_repo (SCI or an "
+                "administrator) first"
+            )
+        if self.layer_id and owned is not None and owned != self.layer_id:
+            raise LedgerError(
+                f"layer {self.layer_id!r} does not belong to product_repo "
+                f"{self.product_repo_id!r} (its layer is {owned!r})"
+            )
+        return self.layer_id or str(owned)
+
+
+def database_mode_requested() -> bool:
+    return os.environ.get(ENV_BACKEND_TYPE, "").strip().lower() == BACKEND_DB
+
+
+def snapshot_marker(layer_path: Path) -> Path:
+    """Sidecar that marks *layer_path* as a database snapshot, not a file ledger."""
+    return layer_path.with_name(layer_path.name + SNAPSHOT_MARKER_SUFFIX)
+
+
+def _write_atomic(path: Path, text: str, *, mode: int) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".snapshot.tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        Path(tmp).chmod(mode)
+        Path(tmp).replace(path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 @dataclass
@@ -56,6 +138,9 @@ class LedgerService:
         ledger.submit_events(layer_path, events)
         result = ledger.query_findings(layer_path)
         ledger.verify(layer_path)
+
+    In database mode ``layer_path`` only names where the snapshot is written;
+    the layer itself is the bound database layer.
     """
 
     def __init__(
@@ -63,17 +148,152 @@ class LedgerService:
         client: LedgerClient | None = None,
         *,
         data_dir: Path | None = None,
+        binding: LayerBinding | None = None,
     ):
+        self._binding = binding
+        self._bound_id: str | None = None
+        self._bound_path: Path | None = None
         if client is not None:
             self._client = client
+            self._database = binding is not None
+            return
+
+        self._database = database_mode_requested()
+        if self._database:
+            url = os.environ.get(ENV_DATABASE_URL, "").strip()
+            if not url:
+                raise LedgerError(
+                    f"{ENV_BACKEND_TYPE}=db but {ENV_DATABASE_URL} is unset; "
+                    "refusing to fall back to the layer file"
+                )
+            self._binding = binding or LayerBinding.from_env()
+            self._client = LedgerClient(backend_type=BACKEND_DB, database_url=url)
             return
 
         # LedgerClient resolves SigningConfig.from_env() internally when no
         # signing_config is passed — no need to import or forward it here.
+        # backend_type is pinned so a stray environment cannot switch modes
+        # behind the caller's back.
         if data_dir is not None:
-            self._client = LedgerClient(data_dir=str(data_dir))
+            self._client = LedgerClient(backend_type="file", data_dir=str(data_dir))
         else:
-            self._client = LedgerClient()
+            self._client = LedgerClient(backend_type="file")
+
+    @property
+    def database_mode(self) -> bool:
+        return self._database
+
+    def _layer(self, layer_path: Path) -> str:
+        """Ledger layer ID: the bound database layer, or the file's stem in file mode.
+
+        Database mode binds one layer *and* one snapshot path per service: a second,
+        different path would otherwise silently read or write the bound layer under
+        another repo's name.
+        """
+        if not self._database:
+            return layer_path.stem
+        path = layer_path.resolve()
+        if self._bound_path is None:
+            self._bound_path = path
+        elif path != self._bound_path:
+            raise LedgerError(
+                f"database mode binds one layer per run: {self._bound_path} is already "
+                f"bound, refusing {path}; bind each layer separately"
+            )
+        if self._bound_id is None:
+            assert self._binding is not None
+            self._bound_id = self._binding.resolve(self._client)
+            logger.info(
+                "ledger database mode bound layer_id=%s product_repo_id=%s snapshot=%s",
+                self._bound_id,
+                self._binding.product_repo_id,
+                path,
+            )
+        return self._bound_id
+
+    def _write_target(self, layer_path: Path) -> str:
+        """Layer ID for a write. File mode refuses to write over a database snapshot."""
+        if not self._database and snapshot_marker(layer_path).exists():
+            raise LedgerError(
+                f"{layer_path} is a read-only database snapshot "
+                f"(see {snapshot_marker(layer_path).name}); writing it in file mode would "
+                f"fork the ledger. Set {ENV_BACKEND_TYPE}=db with the run's binding, or "
+                "remove the marker to adopt the file as a standalone ledger"
+            )
+        return self._layer(layer_path)
+
+    def _refresh(self, layer_path: Path) -> None:
+        """Database mode: re-export the snapshot after a committed write.
+
+        The write is already durable, so a failed export must not invite a retry:
+        the stale snapshot is removed instead (a reader then fails loudly rather
+        than read old state) and the next read re-exports it.
+        """
+        if not self._database:
+            return
+        try:
+            self.write_snapshot(layer_path)
+        except OSError as exc:
+            logger.warning(
+                "ledger write committed but snapshot refresh failed layer_id=%s path=%s: %s",
+                self._bound_id,
+                layer_path,
+                exc,
+            )
+            for stale in (layer_path, snapshot_marker(layer_path)):
+                with contextlib.suppress(OSError):
+                    stale.unlink(missing_ok=True)
+
+    def write_snapshot(self, layer_path: Path) -> dict:
+        """Export the bound database layer to *layer_path* atomically; return it.
+
+        The file is a read-only view for sessions and file readers. Its metadata
+        carries the ``merkle_root``/``merkle_size`` it was taken at, so a stale
+        snapshot is detectable. File mode has nothing to export.
+        """
+        if not self._database:
+            raise LedgerError("write_snapshot needs database mode")
+        layer_id = self._layer(layer_path)
+        try:
+            layer = self._client.get_layer(layer_id)
+        except LedgerError as exc:
+            raise LedgerError(
+                f"{exc}; database mode never creates layers — initialize {layer_id!r} "
+                "for its product_repo (SCI or an administrator) first"
+            ) from exc
+        text = json.dumps(layer, indent=2, ensure_ascii=True) + "\n"
+        marker = snapshot_marker(layer_path)
+        unchanged = (
+            layer_path.is_file()
+            and marker.is_file()
+            and layer_path.read_text(encoding="utf-8") == text
+        )
+        if unchanged:
+            return layer  # no rewrite: keeps mtime and git status meaningful
+        layer_path.parent.mkdir(parents=True, exist_ok=True)
+        meta = layer.get("metadata") or {}
+        _write_atomic(
+            marker,
+            json.dumps(
+                {
+                    "layer_id": layer_id,
+                    "merkle_root": meta.get("merkle_root"),
+                    "merkle_size": meta.get("merkle_size"),
+                    "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                },
+                indent=2,
+            )
+            + "\n",
+            mode=0o444,
+        )
+        _write_atomic(layer_path, text, mode=0o444)
+        logger.info(
+            "ledger snapshot exported layer_id=%s merkle_size=%s path=%s",
+            layer_id,
+            meta.get("merkle_size"),
+            layer_path,
+        )
+        return layer
 
     # ─── Ledger operations (delegate to LedgerClient → Backend) ─────────
 
@@ -88,11 +308,11 @@ class LedgerService:
 
     def query_findings(self, layer_path: Path) -> dict[str, Any]:
         """Resolve current dispositions for all findings in a layer."""
-        return self._client.query_findings(layer_path.stem)
+        return self._client.query_findings(self._layer(layer_path))
 
     def verify(self, layer_path: Path, *, check_signatures: bool = False) -> VerifyResult:
         """Verify Merkle integrity (and optionally signatures) of a layer."""
-        result = self._client.verify(layer_path.stem, check_signatures=check_signatures)
+        result = self._client.verify(self._layer(layer_path), check_signatures=check_signatures)
         return VerifyResult(
             passed=result.get("passed", False),
             findings=result.get("findings", []),
@@ -112,7 +332,7 @@ class LedgerService:
         Deduplication, actor stamping, Merkle finalization, and signing
         are handled by the SDK's submit handler.
         """
-        layer_id = layer_path.stem
+        layer_id = self._write_target(layer_path)
         result = self._client.submit(
             layer_id,
             events,
@@ -128,6 +348,7 @@ class LedgerService:
                 },
             )
 
+        self._refresh(layer_path)
         return SubmitResult(
             event_ids=result.get("event_ids", []),
             queue_added=result.get("queue_added", 0),
@@ -135,7 +356,8 @@ class LedgerService:
 
     def sign(self, layer_path: Path, *, rekor: bool = False) -> None:
         """Stamp Merkle metadata and sign a layer file."""
-        self._client.sign(layer_path.stem, rekor=rekor)
+        self._client.sign(self._write_target(layer_path), rekor=rekor)
+        self._refresh(layer_path)
 
     def resolve_review_item(
         self,
@@ -145,7 +367,9 @@ class LedgerService:
         note: str = "",
     ) -> dict:
         """Mark a review queue item as resolved."""
-        return self._client.resolve(layer_path.stem, key, decision, note)
+        result = self._client.resolve(self._write_target(layer_path), key, decision, note)
+        self._refresh(layer_path)
+        return result
 
     def countersign(
         self,
@@ -163,8 +387,8 @@ class LedgerService:
         The SDK runs the human-lane gates, stamps the actor, and signs
         atomically — the harness never appends or signs events itself.
         """
-        return self._client.countersign(
-            layer_path.stem,
+        result = self._client.countersign(
+            self._write_target(layer_path),
             finding_ref,
             rationale=rationale,
             recorded_at=recorded_at,
@@ -172,20 +396,36 @@ class LedgerService:
             severity=severity,
             actor=actor,
         )
+        self._refresh(layer_path)
+        return result
 
     def whoami(self) -> LayerActor:
         """The verified actor for the current token (see LedgerClient.whoami)."""
         return self._client.whoami()
 
-    # ─── Layer file I/O (local filesystem, bypasses Backend) ──────────
+    # ─── Layer file I/O (file mode: the file; database mode: the snapshot) ──
 
     def read_layer_file(self, layer_path: Path) -> dict:
-        """Load a layer dict from a local JSON file."""
+        """Load the layer. File mode reads the JSON file; database mode reads the
+        bound layer from the database and refreshes the snapshot at *layer_path*."""
+        if self._database:
+            return self.write_snapshot(layer_path)
+        if snapshot_marker(layer_path).exists():
+            logger.warning(
+                "reading a database snapshot in file mode (writes will be refused): %s",
+                layer_path,
+            )
         return json.loads(layer_path.read_text(encoding="utf-8"))
 
     def ensure_layer_file(self, layer_path: Path, *, shell: dict | None = None) -> dict:
-        """Load or create a layer via LedgerClient. Returns the layer dict."""
-        layer_id = layer_path.stem
+        """Load or create a layer via LedgerClient. Returns the layer dict.
+
+        Database mode never creates: the bound layer must already exist
+        (initialized or imported by SCI/an administrator for its product_repo).
+        """
+        if self._database:
+            return self.write_snapshot(layer_path)
+        layer_id = self._write_target(layer_path)  # refuses a snapshot before any write
         try:
             return self.read_layer_file(layer_path)
         except (FileNotFoundError, json.JSONDecodeError):
@@ -215,7 +455,8 @@ class LedgerService:
         *sign* parameter is accepted for backward compat but ignored — writes
         are always atomic (stamped + signed) through the SDK.
         """
-        self._client.patch_metadata(layer_path.stem, updates)
+        self._client.patch_metadata(self._write_target(layer_path), updates)
+        self._refresh(layer_path)
 
     def restate(
         self,
@@ -248,9 +489,11 @@ class LedgerService:
             "after": after,
             "authority": authority,
         }
-        return self._client.restate(
-            layer_path.stem, block, rationale=rationale, finding_ref=finding_ref
+        result = self._client.restate(
+            self._write_target(layer_path), block, rationale=rationale, finding_ref=finding_ref
         )
+        self._refresh(layer_path)
+        return result
 
     def stamp_report_file(self, layer_path: Path, report_path: Path, *, sign: bool = True) -> bool:
         """Pin audit_report_sha256 for *report_path* in the layer.
@@ -273,7 +516,8 @@ class LedgerService:
                 f"({current[:12]}…, now {digest[:12]}…) — restate "
                 "audit_report_sha256 with a ticket and rationale instead of re-stamping"
             )
-        self._client.patch_metadata(layer_path.stem, {"audit_report_sha256": digest})
+        self._client.patch_metadata(self._write_target(layer_path), {"audit_report_sha256": digest})
+        self._refresh(layer_path)
         return True
 
     def stamp_event_identities(self, layer_path: Path, fingerprints: dict[str, str]) -> int:
@@ -284,7 +528,8 @@ class LedgerService:
         in one atomic write — the skill never writes the layer itself. Returns
         the number of events stamped.
         """
-        result = self._client.stamp_event_identities(layer_path.stem, fingerprints)
+        result = self._client.stamp_event_identities(self._write_target(layer_path), fingerprints)
+        self._refresh(layer_path)
         return int(result.get("stamped", 0))
 
     def store_layer(self, layer_path: Path, layer: dict) -> None:
@@ -296,13 +541,17 @@ class LedgerService:
             svc.store_layer(layer_path, layer)
             svc.sign(layer_path)          # stamps + signs atomically
         """
-        self._client.store(layer_path.stem, layer)
+        self._client.store(self._write_target(layer_path), layer)
 
     # ─── Utilities ───────────────────────────────────────────────────────
 
+    def layer_id_for(self, layer_path: Path) -> str:
+        """The ledger layer ID this service uses for *layer_path* (bound ID in database mode)."""
+        return self._layer(layer_path)
+
     @staticmethod
     def layer_id_from_path(layer_path: Path) -> str:
-        """Derive layer_id from a filesystem path (stem without extension)."""
+        """File-mode layer ID (stem without extension). Use :meth:`layer_id_for` instead."""
         return layer_path.stem
 
     @staticmethod
@@ -320,4 +569,13 @@ class LedgerService:
         return json.dumps(list(key))
 
 
-__all__ = ["LedgerClient", "LedgerError", "LedgerService", "SubmitResult", "VerifyResult"]
+__all__ = [
+    "LayerBinding",
+    "LedgerClient",
+    "LedgerError",
+    "LedgerService",
+    "SubmitResult",
+    "VerifyResult",
+    "database_mode_requested",
+    "snapshot_marker",
+]

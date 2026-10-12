@@ -24,6 +24,7 @@ from urllib.parse import urlsplit, urlunsplit
 import pytest
 from test_migration_rehearsal import layer, put, setup
 
+from traust_engine.corpus import migrate_cli
 from traust_engine.corpus import migration_rehearsal as migration
 
 BOOTSTRAP_DSN = os.environ.get("TRAUST_MIGRATION_TEST_DATABASE_URL")
@@ -200,6 +201,28 @@ def test_optional_ledger_import_uses_the_same_product_repo(tmp_path: Path) -> No
             conn.execute("SELECT product_repo_id FROM layers").fetchone()[0]
             == conn.execute("SELECT product_repo_id FROM product_repo").fetchone()[0]
         )
+
+
+def test_cli_imports_layers_into_the_same_database_without_routing_options(
+    tmp_path: Path,
+) -> None:
+    root, config, _ = setup(tmp_path)
+    put(root, "findings/acm/cli/cli-findings-layer.json", layer())
+    target = tmp_path / "target.sqlite"
+    output = tmp_path / "cli-output"
+    profile = tmp_path / "migration.yaml"
+    profile.write_text(
+        f"results-root: {root}\nconfig: {config}\noutput: {output}\n"
+        f"database:\n  type: sqlite\n  path: {target}\n"
+    )
+
+    assert migrate_cli.main(["run", "--profile", str(profile)]) == 0
+    with sqlite3.connect(target) as conn:
+        assert conn.execute("SELECT count(*) FROM layers").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM artifact_binding").fetchone()[0] == 0
+    result = json.loads((output / "run" / "migration-result.json").read_text())
+    assert result["ledger"]["status"] == "passed"
+    assert result["migration_ready"]
 
 
 def test_rejects_findings_without_repository(tmp_path: Path) -> None:

@@ -33,8 +33,6 @@ _TOP_KEYS = frozenset(
         "results-root",
         "config",
         "output",
-        "layer-destination",
-        "ledger-target-url-env",
         "exclude",
         "findings-db",
         "max-seconds",
@@ -81,11 +79,7 @@ def _load_profile(path: Path) -> dict[str, Any]:
     return resolved
 
 
-def main(
-    argv: list[str] | None = None,
-    *,
-    default_layer_destination: str = "storage",
-) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-home", type=Path, help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -105,11 +99,6 @@ def main(
         command.add_argument("--config", type=Path, help="deployment configuration")
         command.add_argument("--output", type=Path, help="new directory outside the source tree")
         command.add_argument(
-            "--layer-destination",
-            choices=("ledger", "storage"),
-            help="route layer files to Ledger (separate migration) or legacy artifact storage",
-        )
-        command.add_argument(
             "--exclude",
             action="append",
             metavar="GLOB",
@@ -126,10 +115,6 @@ def main(
     run.add_argument("--database-dsn", help="PostgreSQL connection string (literal)")
     run.add_argument("--database-dsn-env", help="env var holding the PostgreSQL connection string")
     run.add_argument("--database-path", type=Path, help="SQLite file path (new, nonexistent)")
-    run.add_argument(
-        "--ledger-target-url-env",
-        help="env var containing the Ledger SQLAlchemy URL; enables optional layer import",
-    )
     run.add_argument("--findings-db", type=Path, help="optional read-only reference snapshot")
     run.add_argument(
         "--max-seconds", type=float, help="optional time budget; exhaustion saves a blocked result"
@@ -150,7 +135,6 @@ def main(
     # output dir). An explicit --output is used verbatim.
     if output is not None and getattr(args, "output", None) is None:
         output = output / ("run" if args.command == "inspect" else args.command)
-    layer_destination = pick("layer_destination", default_layer_destination)
     exclude = pick("exclude")
     findings_db = pick("findings_db")
     max_seconds = pick("max_seconds")
@@ -158,7 +142,6 @@ def main(
     database_dsn = pick("database_dsn")
     database_dsn_env = pick("database_dsn_env", "TRAUST_MIGRATION_DSN")
     database_path = pick("database_path")
-    ledger_target_url_env = pick("ledger_target_url_env")
 
     if args.command == "inspect":
         if output is None:
@@ -201,16 +184,11 @@ def main(
     dsn = None
     ledger_target_url = None
     if args.command == "run":
-        if ledger_target_url_env:
-            ledger_target_url = os.environ.get(ledger_target_url_env)
-            if not ledger_target_url:
-                parser.error(f"Ledger target environment variable {ledger_target_url_env} is unset")
-            if layer_destination != "ledger":
-                parser.error("Ledger target requires --layer-destination ledger")
         if database_type == "sqlite":
             if database_path is None:
                 parser.error("sqlite requires database.path (--database-path)")
             dsn = str(database_path)
+            ledger_target_url = f"sqlite:///{database_path.resolve()}"
         else:
             dsn = database_dsn or os.environ.get(database_dsn_env)
             if not dsn:
@@ -219,13 +197,20 @@ def main(
                     file=sys.stderr,
                 )
                 return 2
+            if dsn.startswith("postgresql+psycopg://"):
+                ledger_target_url = dsn
+                dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
+            elif dsn.startswith("postgresql://"):
+                ledger_target_url = dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+            else:
+                parser.error("PostgreSQL migration DSN must be a postgresql:// URL")
     try:
         result = (
             preview(
                 results_root,
                 config,
                 output,
-                route_layers_to_ledger=layer_destination == "ledger",
+                route_layers_to_ledger=True,
                 exclude=exclude,
             )
             if args.command == "plan"
@@ -236,7 +221,7 @@ def main(
                 output,
                 findings_db=findings_db,
                 max_seconds=max_seconds,
-                route_layers_to_ledger=layer_destination == "ledger",
+                route_layers_to_ledger=True,
                 database_type=database_type,
                 exclude=exclude,
                 ledger_target_url=ledger_target_url,
