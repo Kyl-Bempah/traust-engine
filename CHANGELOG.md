@@ -2,6 +2,35 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.21.0]
+
+## Changes
+
+- **The ledger mode comes from the injected context, never the environment.**
+  `ledger.yaml` with a `dsn` (`HarnessContext.ledger`, traust-contracts 0.53.0):
+  the Ledger database is the authority, and `engine.ledger.service(…, layer=…)` /
+  `engine.ledger.pull(path, layer)` work on the one layer the caller binds.
+  No `dsn` (or no `ledger.yaml`): file mode, as before. `LedgerService` no longer reads
+  `LAAS_BACKEND_TYPE`, `LAAS_DATABASE_URL`, `TRAUST_LEDGER_LAYER_ID` or
+  `TRAUST_LEDGER_PRODUCT_REPO_ID`; those variables cannot switch its mode.
+- `LedgerService.database(dsn, binding)` builds database mode explicitly;
+  `LedgerService(data_dir=…)` is always file mode. A bare `postgresql://` DSN is
+  used through psycopg 3.
+- `LedgerOps.service` refuses a missing binding when `ledger.yaml` sets a
+  `dsn`, and a binding when it does not; `LayerBinding()` without a
+  `layer_id` or `product_repo_id` is refused at construction.
+- **Signing and identity come from `ledger.yaml` too**, in both modes:
+  `signing` builds the Ledger `SigningConfig` and `signing_required`;
+  `identity` builds the token verifier (issuer, audience, JWKS or discovery)
+  and the employee-directory cross-check (fail closed if the command is
+  missing). Configured values win over `LAAS_SIGNING_*` / `LEDGER_OIDC_*` /
+  `LEDGER_DIRECTORY_COMMAND`; unconfigured parts keep the Ledger's defaults.
+  Secrets (the caller's ledger token, keypair password, an ambient keyless
+  signing token) still come from the runner.
+- `LedgerService.database(ledger_config, binding)` takes the config section.
+- Pins traust-contracts 0.53.0 and traust-ledger 0.11.1.
+- Snapshot, single-path and file-mode guards from 0.20.0 are unchanged.
+
 ## [0.20.0]
 
 ## Changes

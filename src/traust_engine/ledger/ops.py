@@ -1,17 +1,30 @@
-"""``HarnessEngine.ledger`` — LedgerService gateway, bound to context."""
+"""``HarnessEngine.ledger`` — LedgerService gateway, bound to context.
+
+The ledger mode comes from the injected context, never the environment:
+``ctx.ledger.dsn`` (``ledger.yaml``) set means the Ledger database is the
+authority and every service is bound to the one layer the caller names;
+otherwise layer files are the ledger.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from traust_ledger.client import LedgerError
+
 from traust_engine import locations
 from traust_engine._ops_base import ContextOps
-from traust_engine.ledger.service import LedgerService
+from traust_engine.ledger.service import LayerBinding, LedgerService
 
 
 class LedgerOps(ContextOps):
     def signing_pubkey(self) -> Path | None:
         return self._ctx.signing_pubkey
+
+    @property
+    def database_configured(self) -> bool:
+        """True when ``ledger.yaml`` sets ``dsn``: the Ledger database is the authority."""
+        return self._ctx.ledger is not None and self._ctx.ledger.database
 
     def _default_data_dir(self) -> Path | None:
         ar = locations.analysis_results_dir(self._loc)
@@ -19,21 +32,31 @@ class LedgerOps(ContextOps):
             return ar
         return locations.local_path(self._loc.workspace if self._loc else None)
 
-    def service(self, data_dir: Path | None = None) -> LedgerService:
+    def service(
+        self, data_dir: Path | None = None, *, layer: LayerBinding | None = None
+    ) -> LedgerService:
         """Return a :class:`LedgerService` for this deployment.
 
-        When *data_dir* is omitted, use ``locations.analysis_results`` if set,
-        else ``locations.workspace``. Callers signing a specific layer file should
-        pass ``layer_path.parent`` (the pattern used by disposition emitters).
-
-        In database mode (``LAAS_BACKEND_TYPE=db``) the service ignores *data_dir*
-        and works on the run's bound database layer; see :mod:`.service`.
+        With ``ledger.yaml`` configured, *layer* is required and the service works
+        on that database layer (``data_dir`` is unused). Without it, the service is
+        file mode under *data_dir* — defaulting to ``locations.analysis_results``,
+        else ``locations.workspace`` — and a *layer* binding is an error, since there
+        is no database to bind to.
         """
+        ledger = self._ctx.ledger
+        if ledger is not None and ledger.dsn is not None:
+            if layer is None:
+                raise LedgerError(
+                    "ledger.yaml is configured: pass the run's layer binding "
+                    "(layer_id or product_repo_id); the database ledger is never "
+                    "addressed by file name"
+                )
+            return LedgerService.database(ledger, layer)
+        if layer is not None:
+            raise LedgerError("a layer binding was given but ledger.yaml sets no dsn")
         resolved = data_dir if data_dir is not None else self._default_data_dir()
-        if resolved is not None:
-            return LedgerService(data_dir=resolved)
-        return LedgerService()
+        return LedgerService(data_dir=resolved, ledger=ledger)
 
-    def pull(self, layer_path: Path) -> dict:
-        """Database mode: export the bound layer to *layer_path* as the session snapshot."""
-        return self.service(layer_path.parent).write_snapshot(layer_path)
+    def pull(self, layer_path: Path, layer: LayerBinding) -> dict:
+        """Export the bound database layer to *layer_path* as the session snapshot."""
+        return self.service(layer=layer).write_snapshot(layer_path)

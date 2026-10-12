@@ -12,17 +12,16 @@ Pure computation (fingerprint, compute_event_id, derive_disposition) stays
 importable directly from traust_engine.ledger — those are stateless
 algorithms that don't need a service boundary.
 
-Two modes, chosen once from the environment:
+Two modes, decided by the caller (``LedgerOps`` from ``HarnessContext.ledger``),
+never by environment variables:
 
-* **File mode** (default): the layer file beside the audit *is* the ledger,
-  addressed by its filename stem. Unchanged local workflow.
-* **Database mode** (``LAAS_BACKEND_TYPE=db`` + ``LAAS_DATABASE_URL``): the
-  Ledger database is the authority. The run is bound to one layer
-  (``TRAUST_LEDGER_LAYER_ID`` and/or ``TRAUST_LEDGER_PRODUCT_REPO_ID``), every
-  read and write goes to that layer, and the layer file becomes a read-only
-  *snapshot* re-exported after each read or write. LLM sessions only ever see
-  that file; only the script step holds ledger credentials. Nothing falls back
-  to the file when database mode is configured.
+* **File mode** (``LedgerService(data_dir=…)``): the layer file beside the audit
+  *is* the ledger, addressed by its filename stem. Local workflow.
+* **Database mode** (``LedgerService.database(dsn, binding)``): the Ledger
+  database is the authority. The service is bound to one layer (a
+  :class:`LayerBinding` the caller passes), every read and write goes to that
+  layer, and the layer file becomes a read-only *snapshot* re-exported after each
+  read or write. Nothing falls back to the file.
 """
 
 from __future__ import annotations
@@ -37,18 +36,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from traust_contracts.config import LedgerConfig
 from traust_contracts.v1.models.layer import LayerActor
 from traust_ledger.api import reports
-from traust_ledger.client import LedgerClient, LedgerError
+from traust_ledger.client import LedgerClient, LedgerError, SigningConfig
 
 logger = logging.getLogger(__name__)
 
 SNAPSHOT_MARKER_SUFFIX = ".snapshot"
-ENV_BACKEND_TYPE = "LAAS_BACKEND_TYPE"
-ENV_DATABASE_URL = "LAAS_DATABASE_URL"
-ENV_LAYER_ID = "TRAUST_LEDGER_LAYER_ID"
-ENV_PRODUCT_REPO_ID = "TRAUST_LEDGER_PRODUCT_REPO_ID"
 BACKEND_DB = "db"
+BACKEND_FILE = "file"
+_PSYCOPG_SCHEME = "postgresql+psycopg://"
 
 
 @dataclass(frozen=True)
@@ -58,19 +56,12 @@ class LayerBinding:
     layer_id: str | None = None
     product_repo_id: str | None = None
 
-    @classmethod
-    def from_env(cls) -> LayerBinding:
-        return cls(
-            layer_id=os.environ.get(ENV_LAYER_ID) or None,
-            product_repo_id=os.environ.get(ENV_PRODUCT_REPO_ID) or None,
-        )
+    def __post_init__(self) -> None:
+        if not self.layer_id and not self.product_repo_id:
+            raise LedgerError("a layer binding needs a layer_id or a product_repo_id")
 
     def resolve(self, client: LedgerClient) -> str:
         """The bound layer ID; an explicit ID must belong to the bound owner."""
-        if not self.layer_id and not self.product_repo_id:
-            raise LedgerError(
-                f"database mode needs a layer binding: set {ENV_LAYER_ID} or {ENV_PRODUCT_REPO_ID}"
-            )
         owned = client.find_layer(self.product_repo_id) if self.product_repo_id else None
         if self.product_repo_id and owned is None:
             raise LedgerError(
@@ -86,8 +77,65 @@ class LayerBinding:
         return self.layer_id or str(owned)
 
 
-def database_mode_requested() -> bool:
-    return os.environ.get(ENV_BACKEND_TYPE, "").strip().lower() == BACKEND_DB
+#: Secret-only environment the Ledger signer still reads when ledger.yaml configures
+#: signing: an ambient keyless token is a runner credential, never a config value.
+_SIGNING_TOKEN_ENV = ("LAAS_SIGNING_OIDC_TOKEN", "HARNESS_SIGNING_OIDC_TOKEN")
+
+
+def client_options(ledger: LedgerConfig | None) -> dict[str, Any]:
+    """``LedgerClient`` arguments from ``ledger.yaml``'s ``signing`` and ``identity``.
+
+    Explicit arguments win over the Ledger's own ``LAAS_SIGNING_*`` /
+    ``LEDGER_OIDC_*`` / ``LEDGER_DIRECTORY_COMMAND`` environment fallbacks, so a
+    configured value cannot be overridden from the environment. An unconfigured
+    part keeps the Ledger's defaults. Secrets (the caller's ledger token, a
+    keypair password, an ambient keyless signing token) are never config.
+    """
+    if ledger is None:
+        return {}
+    options: dict[str, Any] = {}
+    if (signing := ledger.signing) is not None:
+        options["signing_config"] = SigningConfig(
+            method=signing.method,
+            key_path=signing.key_path,
+            oidc_issuer=signing.oidc_issuer,
+            oidc_client_id=signing.oidc_client_id,
+            expected_identity=signing.expected_identity,
+            oidc_token=next((os.environ[n] for n in _SIGNING_TOKEN_ENV if n in os.environ), None),
+            ca_url=signing.ca_url,
+            tlog_url=signing.tlog_url,
+        )
+        options["signing_required"] = signing.required
+    if (identity := ledger.identity) is not None:
+        if identity.jwks_url or identity.oidc_issuer:
+            from traust_ledger.auth.verifier import TokenVerifier, VerifierConfig
+
+            jwks_url = identity.jwks_url
+            if jwks_url is None:
+                from traust_ledger.auth.discovery import discover_oidc
+
+                jwks_url = discover_oidc(str(identity.oidc_issuer)).jwks_uri
+            options["verifier"] = TokenVerifier(
+                VerifierConfig(
+                    jwks_url=jwks_url,
+                    issuer=identity.oidc_issuer,
+                    audience=identity.oidc_audience,
+                )
+            )
+        if identity.directory_command:
+            from traust_ledger.auth.directory import DIRECTORY_COMMAND_ENV, load_directory
+
+            options["directory"] = load_directory(
+                {DIRECTORY_COMMAND_ENV: identity.directory_command}
+            )
+    return options
+
+
+def ledger_database_url(dsn: str) -> str:
+    """SQLAlchemy URL for the Ledger client; bare ``postgresql://`` means psycopg 3."""
+    if dsn.startswith("postgresql://"):
+        return _PSYCOPG_SCHEME + dsn.removeprefix("postgresql://")
+    return dsn
 
 
 def snapshot_marker(layer_path: Path) -> Path:
@@ -131,9 +179,9 @@ class LedgerService:
     Signing configuration is read from environment by LedgerClient
     (LAAS_SIGNING_*, HARNESS_SIGNING_*) — callers never supply credentials.
 
-    Usage:
-        ledger = LedgerService()
-        ledger = LedgerService(data_dir=Path("/data"))
+    Usage (prefer ``engine.ledger.service(…)``, which picks the mode from config):
+        ledger = LedgerService(data_dir=Path("/data"))          # file mode
+        ledger = LedgerService.database(ctx.ledger, LayerBinding(…))  # database mode
 
         ledger.submit_events(layer_path, events)
         result = ledger.query_findings(layer_path)
@@ -149,7 +197,16 @@ class LedgerService:
         *,
         data_dir: Path | None = None,
         binding: LayerBinding | None = None,
+        ledger: LedgerConfig | None = None,
     ):
+        """File mode, unless an explicit *client* comes with a *binding* (database mode).
+
+        *ledger* (``ctx.ledger``) supplies signing and identity; see
+        :func:`client_options`.
+
+        The backend is always pinned explicitly so ``LAAS_BACKEND_TYPE`` in the
+        environment cannot switch modes behind the caller's back.
+        """
         self._binding = binding
         self._bound_id: str | None = None
         self._bound_path: Path | None = None
@@ -157,27 +214,30 @@ class LedgerService:
             self._client = client
             self._database = binding is not None
             return
-
-        self._database = database_mode_requested()
-        if self._database:
-            url = os.environ.get(ENV_DATABASE_URL, "").strip()
-            if not url:
-                raise LedgerError(
-                    f"{ENV_BACKEND_TYPE}=db but {ENV_DATABASE_URL} is unset; "
-                    "refusing to fall back to the layer file"
-                )
-            self._binding = binding or LayerBinding.from_env()
-            self._client = LedgerClient(backend_type=BACKEND_DB, database_url=url)
-            return
-
+        if binding is not None:
+            raise LedgerError("a layer binding needs a database client; use LedgerService.database")
+        self._database = False
         # LedgerClient resolves SigningConfig.from_env() internally when no
         # signing_config is passed — no need to import or forward it here.
-        # backend_type is pinned so a stray environment cannot switch modes
-        # behind the caller's back.
+        options = client_options(ledger)
         if data_dir is not None:
-            self._client = LedgerClient(backend_type="file", data_dir=str(data_dir))
+            self._client = LedgerClient(
+                backend_type=BACKEND_FILE, data_dir=str(data_dir), **options
+            )
         else:
-            self._client = LedgerClient(backend_type="file")
+            self._client = LedgerClient(backend_type=BACKEND_FILE, **options)
+
+    @classmethod
+    def database(cls, ledger: LedgerConfig, binding: LayerBinding) -> LedgerService:
+        """Database mode on ``ledger.dsn`` (``ledger.yaml``), bound to one layer."""
+        if ledger.dsn is None:
+            raise LedgerError("database mode needs ledger.yaml dsn")
+        client = LedgerClient(
+            backend_type=BACKEND_DB,
+            database_url=ledger_database_url(ledger.dsn),
+            **client_options(ledger),
+        )
+        return cls(client=client, binding=binding)
 
     @property
     def database_mode(self) -> bool:
@@ -217,8 +277,8 @@ class LedgerService:
             raise LedgerError(
                 f"{layer_path} is a read-only database snapshot "
                 f"(see {snapshot_marker(layer_path).name}); writing it in file mode would "
-                f"fork the ledger. Set {ENV_BACKEND_TYPE}=db with the run's binding, or "
-                "remove the marker to adopt the file as a standalone ledger"
+                "fork the ledger. Configure ledger.yaml and pass the run's layer binding, "
+                "or remove the marker to adopt the file as a standalone ledger"
             )
         return self._layer(layer_path)
 
@@ -576,6 +636,7 @@ __all__ = [
     "LedgerService",
     "SubmitResult",
     "VerifyResult",
-    "database_mode_requested",
+    "client_options",
+    "ledger_database_url",
     "snapshot_marker",
 ]
