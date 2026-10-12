@@ -2076,8 +2076,8 @@ wheels = [
 
 [[package]]
 name = "traust-contracts"
-version = "0.52.0"
-source = { git = "https://github.com/traust-security/traust-contracts.git?rev=24327d926764dbe2fa0f97da87cbde02c2e6074b#24327d926764dbe2fa0f97da87cbde02c2e6074b" }
+version = "0.53.0"
+source = { git = "https://github.com/traust-security/traust-contracts.git?rev=a1d602b4266be4f8645c1c682d8c3439501167ad#a1d602b4266be4f8645c1c682d8c3439501167ad" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "traust-engine"
-version = "0.20.0"
+version = "0.21.0"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },
@@ -2145,9 +2145,9 @@ requires-dist = [
     { name = "referencing" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.2" },
     { name = "sigstore", marker = "extra == 'signing'", specifier = ">=4.0,<5.0" },
-    { name = "traust-contracts", git = "https://github.com/traust-security/traust-contracts.git?rev=24327d926764dbe2fa0f97da87cbde02c2e6074b" },
-    { name = "traust-ledger", git = "https://github.com/traust-security/traust-ledger.git?rev=7589cca35452275aec96bded61f1e6e3992f262e" },
-    { name = "traust-ledger", extras = ["db"], marker = "extra == 'ledger-migration'", git = "https://github.com/traust-security/traust-ledger.git?rev=7589cca35452275aec96bded61f1e6e3992f262e" },
+    { name = "traust-contracts", git = "https://github.com/traust-security/traust-contracts.git?rev=a1d602b4266be4f8645c1c682d8c3439501167ad" },
+    { name = "traust-ledger", git = "https://github.com/traust-security/traust-ledger.git?rev=a20ffd476529e50b2e266e3311adbf48d6a8f5f6" },
+    { name = "traust-ledger", extras = ["db"], marker = "extra == 'ledger-migration'", git = "https://github.com/traust-security/traust-ledger.git?rev=a20ffd476529e50b2e266e3311adbf48d6a8f5f6" },
     { name = "tree-sitter", marker = "extra == 'graph'" },
     { name = "tree-sitter-go", marker = "extra == 'graph'" },
     { name = "tree-sitter-javascript", marker = "extra == 'graph'" },
@@ -2166,8 +2166,8 @@ dev = [
 
 [[package]]
 name = "traust-ledger"
-version = "0.11.0"
-source = { git = "https://github.com/traust-security/traust-ledger.git?rev=7589cca35452275aec96bded61f1e6e3992f262e#7589cca35452275aec96bded61f1e6e3992f262e" }
+version = "0.11.1"
+source = { git = "https://github.com/traust-security/traust-ledger.git?rev=a20ffd476529e50b2e266e3311adbf48d6a8f5f6#a20ffd476529e50b2e266e3311adbf48d6a8f5f6" }
 dependencies = [
     { name = "jsonschema" },
     { name = "pyjwt", extra = ["crypto"] },

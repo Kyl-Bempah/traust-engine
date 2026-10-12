@@ -69,11 +69,13 @@ def test_service_constructs_client_from_data_dir(cosign_key, monkeypatch):
     assert service._client is not None
 
 
-def test_service_constructs_client_from_env(cosign_key, monkeypatch):
-    """LedgerService() with no args creates a LedgerClient from env."""
+def test_service_never_takes_its_directory_from_env(cosign_key, monkeypatch):
+    """No data_dir is an error, not a LAAS_DATA_DIR fallback."""
+    from traust_engine.ledger import LedgerError
+
     monkeypatch.setenv("LAAS_DATA_DIR", str(cosign_key))
-    service = LedgerService()
-    assert service._client is not None
+    with pytest.raises(LedgerError, match="needs the layer's directory"):
+        LedgerService()
 
 
 def test_explicit_client_is_not_overridden(cosign_key, monkeypatch):

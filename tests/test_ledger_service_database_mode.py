@@ -1,5 +1,8 @@
 """Database mode: the Ledger DB is the authority and the layer file is a read-only snapshot.
 
+The mode comes from the injected context (``ledger.yaml`` → ``ctx.ledger``) and the
+caller's explicit layer binding — never from environment variables.
+
 The harness keeps working on files (LLM sessions never hold ledger credentials), but
 every script write lands on the run's bound database layer and re-exports the
 snapshot, so a countersign written to the database out of band (for example from
@@ -136,8 +139,8 @@ def test_binding_must_match_its_owner(ledger_db, tmp_path) -> None:
     path = tmp_path / "repo-findings-layer.json"
     with pytest.raises(LedgerError, match="has no ledger layer"):
         _service(url, LayerBinding(product_repo_id=other)).read_layer_file(path)
-    with pytest.raises(LedgerError, match="needs a layer binding"):
-        _service(url, LayerBinding()).read_layer_file(path)
+    with pytest.raises(LedgerError, match="needs a layer_id or a product_repo_id"):
+        LayerBinding()
     assert not path.exists()
 
 
@@ -152,26 +155,79 @@ def test_database_mode_never_creates_or_falls_back_to_the_file(ledger_db, tmp_pa
     assert DbBackend(create_engine(url)).list_layer_ids() == [LAYER_ID]
 
 
-def test_configured_database_without_url_refuses(monkeypatch) -> None:
-    monkeypatch.setenv("LAAS_BACKEND_TYPE", "db")
-    monkeypatch.delenv("LAAS_DATABASE_URL", raising=False)
-    with pytest.raises(LedgerError, match="refusing to fall back"):
-        LedgerService()
+def _ops(ledger_dsn: str | None):
+    """LedgerOps on the suite's config, with or without a ``ledger.yaml`` section."""
+    from traust_contracts import load_context
+    from traust_contracts.config import LedgerConfig
+
+    from traust_engine.ledger.ops import LedgerOps
+
+    ledger = LedgerConfig(dsn=ledger_dsn) if ledger_dsn else None
+    return LedgerOps(load_context().model_copy(update={"ledger": ledger}))
 
 
-def test_environment_selects_database_mode_and_binding(ledger_db, monkeypatch, tmp_path) -> None:
+def test_ledger_config_selects_database_mode_for_the_given_layer(ledger_db, tmp_path) -> None:
     url, owner, _ = ledger_db
+    ops = _ops(url)
+    assert ops.database_configured
+    svc = ops.service(tmp_path, layer=LayerBinding(product_repo_id=owner))
+    assert svc.database_mode
+    assert svc.layer_id_for(tmp_path / "repo-findings-layer.json") == LAYER_ID
+
+
+def test_ledger_config_requires_an_explicit_binding(ledger_db, tmp_path) -> None:
+    url, _, _ = ledger_db
+    with pytest.raises(LedgerError, match="pass the run's layer binding"):
+        _ops(url).service(tmp_path)
+
+
+def test_binding_without_ledger_config_refuses(tmp_path) -> None:
+    ops = _ops(None)
+    assert not ops.database_configured
+    with pytest.raises(LedgerError, match=r"ledger\.yaml sets no dsn"):
+        ops.service(tmp_path, layer=LayerBinding(layer_id=LAYER_ID))
+    with pytest.raises(LedgerError, match="needs a database client"):
+        LedgerService(data_dir=tmp_path, binding=LayerBinding(layer_id=LAYER_ID))
+
+
+def test_pull_exports_the_bound_layer(ledger_db, tmp_path) -> None:
+    url, owner, _ = ledger_db
+    snapshot = tmp_path / "repo-findings-layer.json"
+    layer = _ops(url).pull(snapshot, LayerBinding(product_repo_id=owner))
+    assert json.loads(snapshot.read_text(encoding="utf-8")) == layer
+
+
+def test_ledger_config_without_dsn_stays_file_mode(tmp_path) -> None:
+    """signing/identity alone (no dsn) keep layer files as the ledger."""
+    from traust_contracts import load_context
+    from traust_contracts.config import LedgerConfig, LedgerSigning
+
+    from traust_engine.ledger.ops import LedgerOps
+
+    ledger = LedgerConfig(signing=LedgerSigning(method="keypair"))
+    ops = LedgerOps(load_context().model_copy(update={"ledger": ledger}))
+    assert not ops.database_configured
+    assert not ops.service(tmp_path).database_mode
+
+
+def test_environment_never_switches_modes(ledger_db, monkeypatch, tmp_path) -> None:
+    """The Ledger SDK's LAAS_* variables must not change what the engine does."""
+    url, _, _ = ledger_db
     monkeypatch.setenv("LAAS_BACKEND_TYPE", "db")
     monkeypatch.setenv("LAAS_DATABASE_URL", url)
-    monkeypatch.setenv("TRAUST_LEDGER_PRODUCT_REPO_ID", owner)
-    monkeypatch.delenv("TRAUST_LEDGER_LAYER_ID", raising=False)
-    svc = LedgerService(data_dir=tmp_path)  # data_dir is ignored in database mode
-    assert svc.database_mode
-    assert svc.layer_id_for(tmp_path / "anything-findings-layer.json") == LAYER_ID
+    assert not LedgerService(data_dir=tmp_path).database_mode
+    assert not _ops(None).service(tmp_path).database_mode
 
 
-def test_file_mode_is_unchanged(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("LAAS_BACKEND_TYPE", raising=False)
+def test_bare_postgresql_dsn_uses_psycopg() -> None:
+    from traust_engine.ledger.service import ledger_database_url
+
+    assert ledger_database_url("postgresql://u@h/db") == "postgresql+psycopg://u@h/db"
+    assert ledger_database_url("postgresql+psycopg://u@h/db") == "postgresql+psycopg://u@h/db"
+    assert ledger_database_url("sqlite:////tmp/l.db") == "sqlite:////tmp/l.db"
+
+
+def test_file_mode_is_unchanged(tmp_path) -> None:
     path = tmp_path / "repo-findings-layer.json"
     path.write_text(json.dumps(SHELL), encoding="utf-8")
     svc = LedgerService(data_dir=tmp_path)
@@ -205,8 +261,8 @@ def test_one_service_binds_one_layer_path(ledger_db, tmp_path) -> None:
     assert events == []
 
 
-def test_file_mode_refuses_to_write_over_a_snapshot(ledger_db, tmp_path, monkeypatch) -> None:
-    """A process that lost the database environment must not fork the ledger on disk."""
+def test_file_mode_refuses_to_write_over_a_snapshot(ledger_db, tmp_path) -> None:
+    """A process without ledger.yaml must not fork the ledger on disk."""
     from traust_engine.ledger.service import snapshot_marker
 
     url, owner, _ = ledger_db
@@ -214,7 +270,6 @@ def test_file_mode_refuses_to_write_over_a_snapshot(ledger_db, tmp_path, monkeyp
     _service(url, LayerBinding(product_repo_id=owner)).read_layer_file(snapshot)
     assert snapshot_marker(snapshot).is_file()
 
-    monkeypatch.delenv("LAAS_BACKEND_TYPE", raising=False)
     file_svc = LedgerService(data_dir=tmp_path)
     assert file_svc.read_layer_file(snapshot)["events"] == []  # reading is allowed
     for write in (
@@ -291,3 +346,102 @@ def test_binding_and_snapshot_are_logged(ledger_db, tmp_path, caplog) -> None:
     assert any("bound layer_id=" + LAYER_ID in m for m in messages)
     assert any("snapshot exported" in m and "merkle_size=" in m for m in messages)
     assert not any(url in m for m in messages)  # the DSN is never logged
+
+
+# ─── signing and identity from ledger.yaml ───────────────────────────────────
+
+
+def test_without_ledger_yaml_the_environment_is_ignored(monkeypatch, tmp_path) -> None:
+    """No ledger.yaml means explicit defaults, not the Ledger SDK's env fallbacks."""
+    from traust_engine.ledger import ClientSettings
+
+    monkeypatch.setenv("LAAS_SIGNING_REQUIRED", "1")
+    monkeypatch.setenv("LAAS_SIGNING_KEY_PATH", "/env/other.key")
+    monkeypatch.setenv("LEDGER_DIRECTORY_COMMAND", "/nonexistent/directory")
+    settings = ClientSettings.from_config(None)
+    assert settings.signing_required is False
+    assert settings.signing_config.key_path is None
+    assert settings.directory is False
+    assert settings.verifier is None and not settings.database
+    client = LedgerService(data_dir=tmp_path, settings=settings)._client
+    assert client._config.signing_required is False
+
+
+def test_signing_config_comes_from_ledger_yaml_not_env(monkeypatch, tmp_path) -> None:
+    from traust_contracts.config import LedgerConfig, LedgerSigning
+
+    from traust_engine.ledger import ClientSettings
+
+    monkeypatch.setenv("LAAS_SIGNING_METHOD", "identity")
+    monkeypatch.setenv("LAAS_SIGNING_KEY_PATH", "/env/other.key")
+    monkeypatch.setenv("LAAS_SIGNING_REQUIRED", "0")
+    ledger = LedgerConfig(
+        signing=LedgerSigning(required=True, method="keypair", key_path="/run/cosign.key")
+    )
+    settings = ClientSettings.from_config(ledger)
+    signing = settings.signing_config
+    assert (signing.method, signing.key_path) == ("keypair", "/run/cosign.key")
+    assert signing.oidc_token is None  # never read from the environment
+    assert settings.signing_required is True
+    client = LedgerService(data_dir=tmp_path, settings=settings)._client
+    assert client._config.signing_required is True
+
+
+def test_identity_config_builds_verifier_and_directory() -> None:
+    from traust_contracts.config import LedgerConfig, LedgerIdentity
+    from traust_ledger.auth.directory import DirectoryUnavailableError, ScriptDirectory
+    from traust_ledger.auth.verifier import TokenVerifier
+
+    from traust_engine.ledger import ClientSettings
+
+    settings = ClientSettings.from_config(
+        LedgerConfig(
+            identity=LedgerIdentity(
+                oidc_issuer="https://issuer.example",
+                oidc_audience="laas-api",
+                jwks_url="https://issuer.example/keys",
+                directory_command="/bin/echo active",
+            )
+        )
+    )
+    assert isinstance(settings.verifier, TokenVerifier)
+    assert settings.verifier._config.audience == "laas-api"
+    assert isinstance(settings.directory, ScriptDirectory)
+
+    with pytest.raises(DirectoryUnavailableError):  # fail closed on a missing program
+        ClientSettings.from_config(
+            LedgerConfig(identity=LedgerIdentity(directory_command="/nonexistent/directory"))
+        )
+
+
+def test_database_mode_uses_the_same_settings(ledger_db) -> None:
+    from traust_contracts.config import LedgerConfig, LedgerSigning
+
+    from traust_engine.ledger import ClientSettings
+
+    url, owner, _ = ledger_db
+    settings = ClientSettings.from_config(
+        LedgerConfig(dsn=url, signing=LedgerSigning(method="keypair"))
+    )
+    svc = LedgerService.database(settings, LayerBinding(product_repo_id=owner))
+    assert svc.database_mode
+    assert svc._client._config.signing_required is False
+    with pytest.raises(LedgerError, match=r"use LedgerService\.database"):
+        LedgerService(data_dir=Path("/tmp"), settings=settings)
+
+
+def test_settings_are_resolved_once_per_context(ledger_db) -> None:
+    url, _, _ = ledger_db
+    ops = _ops(url)
+    assert ops.settings is ops.settings
+
+
+def test_run_binding_applies_to_later_service_calls(ledger_db, tmp_path) -> None:
+    url, owner, other = ledger_db
+    ops = _ops(url)
+    ops.bind(LayerBinding(product_repo_id=owner))
+    assert ops.service(tmp_path).layer_id_for(tmp_path / "repo-findings-layer.json") == LAYER_ID
+    assert ops.pull(tmp_path / "repo-findings-layer.json")["events"] == []
+    ops.bind(LayerBinding(product_repo_id=owner))  # same binding again is fine
+    with pytest.raises(LedgerError, match="run already bound"):
+        ops.bind(LayerBinding(product_repo_id=other))

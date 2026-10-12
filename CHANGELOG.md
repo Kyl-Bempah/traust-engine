@@ -2,6 +2,36 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.21.0]
+
+## Changes (breaking)
+
+- **The ledger is configured only by the injected context.** `ClientSettings`
+  resolves every `LedgerClient` argument once from `ctx.ledger`
+  (`ledger.yaml`, traust-contracts 0.53.0) and passes all of them explicitly,
+  so the Ledger SDK's environment fallbacks never apply:
+  - `dsn` set: database mode on the one layer the caller binds
+    (`engine.ledger.service(…, layer=…)`, `engine.ledger.bind(layer)` once per
+    run, `engine.ledger.pull(path)`). No `dsn`: file mode.
+  - `signing` → `SigningConfig` + `signing_required`; `identity` → the token
+    verifier (JWKS, or discovered from the issuer) and the employee-directory
+    check (fail closed on a missing command).
+  - Unconfigured parts get explicit defaults — no signing requirement, no
+    key, no directory — **not** `LAAS_SIGNING_*`, `LAAS_DATA_DIR`,
+    `LAAS_BACKEND_TYPE`, `LAAS_DATABASE_URL`, `LEDGER_OIDC_*` or
+    `LEDGER_DIRECTORY_COMMAND`. **Deployments that signed through
+    `LAAS_SIGNING_*` must move those settings into `ledger.yaml` `signing`.**
+  - The only value still resolved by the Ledger is the caller's token
+    (`ledger auth login`, a token file or `LAAS_TOKEN`) and, without
+    `identity`, its verifier — a caller credential, not deployment config.
+- `LedgerService(data_dir=…, settings=…)` is file mode and needs a directory
+  (no `LAAS_DATA_DIR` default); `LedgerService.database(settings, binding)` is
+  database mode. `engine.ledger.service()` builds both from the context, and
+  refuses a missing binding when `dsn` is set, a binding when it is not, and a
+  missing layer directory. `LayerBinding()` without either field is refused.
+- Pins traust-contracts 0.53.0 and traust-ledger 0.11.1 (traust-security/traust-ledger#83).
+- Snapshot, single-path and file-mode guards from 0.20.0 are unchanged.
+
 ## [0.20.0]
 
 ## Changes
