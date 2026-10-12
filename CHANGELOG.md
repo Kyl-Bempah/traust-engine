@@ -28,6 +28,9 @@ All notable changes to traust-engine are documented here.
   Secrets (the caller's ledger token, keypair password, an ambient keyless
   signing token) still come from the runner.
 - `LedgerService.database(ledger_config, binding)` takes the config section.
+- `engine.ledger.bind(layer)` sets the run's layer once at the entry point (a
+  CLI argument); later `service()` / `pull()` calls without their own `layer`
+  use it, and rebinding to a different layer is refused.
 - Pins traust-contracts 0.53.0 and traust-ledger 0.11.1.
 - Snapshot, single-path and file-mode guards from 0.20.0 are unchanged.
 

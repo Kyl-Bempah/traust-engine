@@ -18,6 +18,19 @@ from traust_engine.ledger.service import LayerBinding, LedgerService
 
 
 class LedgerOps(ContextOps):
+    _run_layer: LayerBinding | None = None
+
+    def bind(self, layer: LayerBinding) -> None:
+        """Set the run's layer once at the entry point (a CLI argument, never env).
+
+        Every later :meth:`service` / :meth:`pull` call without its own *layer*
+        uses it, so deep callers need not thread the binding through. Binding a
+        different layer later in the same run is refused.
+        """
+        if self._run_layer is not None and self._run_layer != layer:
+            raise LedgerError(f"run already bound to {self._run_layer}; refusing {layer}")
+        self._run_layer = layer
+
     def signing_pubkey(self) -> Path | None:
         return self._ctx.signing_pubkey
 
@@ -37,13 +50,15 @@ class LedgerOps(ContextOps):
     ) -> LedgerService:
         """Return a :class:`LedgerService` for this deployment.
 
-        With ``ledger.yaml`` configured, *layer* is required and the service works
+        *layer* defaults to the run binding from :meth:`bind`.
+        With ``ledger.yaml`` configured, a layer is required and the service works
         on that database layer (``data_dir`` is unused). Without it, the service is
         file mode under *data_dir* — defaulting to ``locations.analysis_results``,
         else ``locations.workspace`` — and a *layer* binding is an error, since there
         is no database to bind to.
         """
         ledger = self._ctx.ledger
+        layer = layer or self._run_layer
         if ledger is not None and ledger.dsn is not None:
             if layer is None:
                 raise LedgerError(
@@ -57,6 +72,6 @@ class LedgerOps(ContextOps):
         resolved = data_dir if data_dir is not None else self._default_data_dir()
         return LedgerService(data_dir=resolved, ledger=ledger)
 
-    def pull(self, layer_path: Path, layer: LayerBinding) -> dict:
+    def pull(self, layer_path: Path, layer: LayerBinding | None = None) -> dict:
         """Export the bound database layer to *layer_path* as the session snapshot."""
         return self.service(layer=layer).write_snapshot(layer_path)

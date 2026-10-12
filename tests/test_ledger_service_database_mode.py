@@ -414,3 +414,14 @@ def test_database_mode_uses_the_same_signing(ledger_db) -> None:
     svc = LedgerService.database(ledger, LayerBinding(product_repo_id=owner))
     assert svc.database_mode
     assert svc._client._config.signing_required is False
+
+
+def test_run_binding_applies_to_later_service_calls(ledger_db, tmp_path) -> None:
+    url, owner, other = ledger_db
+    ops = _ops(url)
+    ops.bind(LayerBinding(product_repo_id=owner))
+    assert ops.service(tmp_path).layer_id_for(tmp_path / "repo-findings-layer.json") == LAYER_ID
+    assert ops.pull(tmp_path / "repo-findings-layer.json")["events"] == []
+    ops.bind(LayerBinding(product_repo_id=owner))  # same binding again is fine
+    with pytest.raises(LedgerError, match="run already bound"):
+        ops.bind(LayerBinding(product_repo_id=other))
