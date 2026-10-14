@@ -2,6 +2,17 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.22.0]
+
+- **The gitleaks adapter no longer honours `gitleaks:allow` comments in the
+  scanned target.** `traust_engine.adapters.gitleaks` passes
+  `--ignore-gitleaks-allow`: a suppression the audited repository ships for
+  its own lines is repository content under audit, not an exemption. Hits on
+  such lines are now reported, with `inline_allow: true` on the candidate and
+  a note in the finding description so the judge sees the marker and weighs
+  it. Only that boolean leaves the adapter, never line content. Tested
+  against gitleaks 8.30.1.
+
 ## [0.21.0]
 
 ## Changes (breaking)

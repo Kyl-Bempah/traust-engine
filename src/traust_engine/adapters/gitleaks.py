@@ -8,6 +8,12 @@ validate-findings credential-liveness verifier. The matched secret value
 itself is NEVER written to the output: downstream consumers that need it
 (the liveness probe) re-read it from the checkout at probe time.
 
+Inline ``gitleaks:allow`` comments in the target are IGNORED
+(``--ignore-gitleaks-allow``): the target is the code under audit, and a
+suppression it ships for itself is repository content, not an exemption
+(docs/adversarial-content-doctrine.md in traust). Candidates on such lines
+carry ``inline_allow: true`` so the judge sees the marker and weighs it.
+
 This is a CANDIDATE GENERATOR, never a finder or verdict of record
 (docs/deterministic-inferential-mix.md: deterministic tools route,
 gate, tag, or index — never conclude). A regex hit may be a test fixture,
@@ -117,6 +123,35 @@ def tool_version(binary):
         return None
 
 
+INLINE_ALLOW_MARKER = "gitleaks:allow"
+
+
+def _has_inline_allow(finding: dict, repo: Path, path: str, mode: str) -> bool:
+    """True when the matched line carries the target's own suppression marker.
+
+    gitleaks redacts only the secret, so the marker survives in ``Line`` /
+    ``Match``. Dir mode falls back to reading the line from the checkout;
+    only the boolean leaves this function, never line content.
+    """
+    for key in ("Line", "Match"):
+        if INLINE_ALLOW_MARKER in (finding.get(key) or ""):
+            return True
+    start = finding.get("StartLine")
+    if mode != "dir" or not path or not isinstance(start, int) or start < 1:
+        return False
+    end = finding.get("EndLine") if isinstance(finding.get("EndLine"), int) else start
+    try:
+        with (repo / path).open(encoding="utf-8", errors="replace") as fh:
+            for lineno, line in enumerate(fh, 1):
+                if lineno > end:
+                    break
+                if lineno >= start and INLINE_ALLOW_MARKER in line:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def parse_report(findings: list, repo: Path, mode: str) -> list[dict]:
     """Reduce gitleaks findings to secret-free candidates."""
     candidates = []
@@ -137,6 +172,7 @@ def parse_report(findings: list, repo: Path, mode: str) -> list[dict]:
             "fingerprint": f.get("Fingerprint") or "",
             "liveness_class": LIVENESS_CLASSES.get(rule),
             "evidence": "secret_pattern_match",
+            "inline_allow": _has_inline_allow(f, repo, path, mode),
         }
         if mode == "history":
             cand["commit"] = f.get("Commit") or None
@@ -171,6 +207,9 @@ def _run_gitleaks(
             "--report-path",
             str(report_path),
             "--redact=100",
+            # The target's own gitleaks:allow comments are data under audit,
+            # never exemptions; parse_report flags them as inline_allow.
+            "--ignore-gitleaks-allow",
             "--exit-code",
             "0",
             "--no-banner",
@@ -186,6 +225,17 @@ def _run_gitleaks(
         return findings or []
     finally:
         report_path.unlink(missing_ok=True)
+
+
+def _describe(cand: dict) -> str:
+    text = cand.get("description", "")
+    if cand.get("inline_allow"):
+        note = (
+            "The target marks this line gitleaks:allow; a suppression shipped "
+            "by the audited repo is not an exemption, judge the candidate."
+        )
+        text = f"{text} ({note})" if text else note
+    return text
 
 
 def _candidates_to_findings(candidates: list[dict]) -> list[dict[str, Any]]:
@@ -208,7 +258,7 @@ def _candidates_to_findings(candidates: list[dict]) -> list[dict[str, Any]]:
                 "title": cand.get("description") or cand["rule_id"],
                 "severity": map_severity("high"),
                 "locations": [loc],
-                "description": cand.get("description", ""),
+                "description": _describe(cand),
                 "origin": "gitleaks",
                 "fingerprint": cand.get("fingerprint", ""),
                 "category": cand.get("rule_id", ""),

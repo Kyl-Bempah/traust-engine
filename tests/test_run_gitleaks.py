@@ -102,6 +102,36 @@ def test_history_mode_keeps_author_not_message():
     assert c["liveness_class"] == "aws"
 
 
+def test_inline_allow_from_redacted_line_is_flagged():
+    findings = [
+        {
+            "RuleID": "generic-api-key",
+            "File": "x",
+            "StartLine": 1,
+            "Line": 'KEY = "REDACTED"  # gitleaks:allow',
+        }
+    ]
+    c = rg.parse_report(findings, Path("/nonexistent"), "dir")[0]
+    assert c["inline_allow"] is True
+    assert "gitleaks:allow" in rg._candidates_to_findings([c])[0]["description"]
+
+
+def test_inline_allow_read_from_checkout_without_leaking_line(tmp_path):
+    (tmp_path / "settings.py").write_text(f'TOKEN = "{FAKE_TOKEN}"  # gitleaks:allow\nOTHER = 1\n')
+    findings = [{"RuleID": "traust-openshift-sha256-token", "File": "settings.py", "StartLine": 1}]
+    c = rg.parse_report(findings, tmp_path, "dir")[0]
+    assert c["inline_allow"] is True
+    assert FAKE_TOKEN not in json.dumps(c)
+
+
+def test_no_marker_is_not_inline_allow(tmp_path):
+    (tmp_path / "settings.py").write_text(f'TOKEN = "{FAKE_TOKEN}"\n')
+    findings = [{"RuleID": "traust-openshift-sha256-token", "File": "settings.py", "StartLine": 1}]
+    c = rg.parse_report(findings, tmp_path, "dir")[0]
+    assert c["inline_allow"] is False
+    assert "gitleaks:allow" not in rg._candidates_to_findings([c])[0]["description"]
+
+
 def test_unmapped_rule_is_untestable():
     c = rg.parse_report([{"RuleID": "generic-api-key", "File": "x"}], Path("/nonexistent"), "dir")[
         0
@@ -121,6 +151,21 @@ def test_dir_scan_end_to_end(tmp_path):
     assert doc["metadata"]["mode"] == "dir"
     rules = [c["rule_id"] for c in doc["candidates"]]
     assert "traust-openshift-sha256-token" in rules
+    assert FAKE_TOKEN not in out.read_text()
+
+
+@pytest.mark.integration
+@pytest.mark.requires_git
+@pytest.mark.skipif(not HAVE_GITLEAKS, reason="gitleaks not on PATH")
+def test_dir_scan_ignores_target_inline_allow(tmp_path):
+    repo = _mk_repo(tmp_path)
+    (repo / "config.py").write_text(f'token = "{FAKE_TOKEN}"  # gitleaks:allow\n')
+    out = tmp_path / "out.json"
+    _run_cli(repo, out, config=RULES / "gitleaks-default.toml")
+    cands = json.loads(out.read_text())["candidates"]
+    hits = [c for c in cands if c["rule_id"] == "traust-openshift-sha256-token"]
+    assert hits, "a target-supplied gitleaks:allow comment must not suppress the candidate"
+    assert all(c["inline_allow"] for c in hits)
     assert FAKE_TOKEN not in out.read_text()
 
 
