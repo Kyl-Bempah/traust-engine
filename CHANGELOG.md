@@ -2,6 +2,29 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.25.0]
+
+- **Version gates read the audit date first, so they hold across the
+  2026-09-10 reset.** traust reset its version to 0.1.0 that day, and the
+  numberings overlap: a pre-reset `0.186.2` and a post-reset `0.18.6`
+  compared the wrong way round. `_gate()` takes the numbering from the
+  audit's date (a cumulative report's `cumulative.original_report_date`,
+  since `build_cumulative` re-stamps `metadata.date`) and only then compares.
+  - Pre-reset reports keep today's numeric gates.
+  - Post-reset reports meet every pre-reset gate (canonical IDs, the 0.15.0
+    consistency rules, and `deterministic_steps`, which no post-reset report
+    could reach before).
+  - Revalidating 4,922 corpus reports (all 304 pre-reset 0.1xx audits, all
+    4,118 cumulative reports, 500 random audits) gives identical results.
+- **`review_surface_coverage` cross-checks (traust-contracts 0.56.0).**
+  - Code-profile audits from traust 0.20.0 must carry the record.
+  - `finding` must name findings that exist.
+  - `negative` needs a `negative_results` entry whose `area` is the surface
+    ID, optionally followed by a space and a qualifier.
+  - `not_assessed` needs a `coverage_gaps` entry
+    `{tool: review-surfaces, system: <surface>}`.
+  - The schema already checks the record's shape.
+
 ## [0.24.0]
 
 - **The opengrep adapter no longer honours the scanned target's own `nosem`

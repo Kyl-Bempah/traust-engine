@@ -34,7 +34,14 @@ CANONICAL_FINDING_ID = re.compile(r"^[A-Z][A-Z0-9_]{0,23}-[a-f0-9]{7}-\d{3}$")
 # has not existed since the code moved into this package, and the "Fix:"
 # lines below get copy-pasted by whoever hit the error.
 _IDENTITY_CMD = "python3 -m traust_engine._util.finding_identity"
-# Harness version at which canonical IDs become mandatory.
+# traust reset its version to 0.1.0 on this date (release: reset to 0.1.0,
+# 2026-09-10). Versions before and after overlap -- a pre-reset 0.186.2 and a
+# post-reset 0.18.6 compare the wrong way round -- so a version gate first
+# reads the report's audit date to pick the numbering, then compares within
+# it (see _gate). Every *_MIN_VERSION below except REVIEW_SURFACE_MIN_VERSION
+# is in the PRE-reset numbering, and post-reset releases include all of it.
+VERSION_RESET_DATE = "2026-09-10"
+# Harness version at which canonical IDs become mandatory (pre-reset numbering).
 CANONICAL_ID_MIN_VERSION = (0, 12, 0)
 # Harness version at which the 0.15.0 consistency conventions become
 # mandatory: peach_isolation_review present, validation_status set on every
@@ -42,6 +49,10 @@ CANONICAL_ID_MIN_VERSION = (0, 12, 0)
 # Derived from a portfolio drift audit of 5,488 reports (2026-07-08): these
 # fields oscillated per batch prompt whenever the validator did not pin them.
 CONSISTENCY_MIN_VERSION = (0, 15, 0)
+# Post-reset traust version whose /secure-code-audit records
+# review_surface_coverage (traust-contracts 0.56.0): code-profile reports from
+# it on must carry the record.
+REVIEW_SURFACE_MIN_VERSION = (0, 20, 0)
 
 # Recommended finding-category vocabulary (kebab-case). Free text remains
 # schema-valid, but strict mode warns on values outside this set for reports
@@ -82,6 +93,45 @@ def _parse_harness_version(meta: dict) -> tuple[int, int, int] | None:
     if not m:
         return None
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def _audit_date(meta: dict) -> str:
+    """The date the audit ran.
+
+    A cumulative report (track-findings) re-stamps metadata.date with its own
+    build date but keeps the audit's harness_version, and records the audit's
+    date as additional.cumulative.original_report_date; the epoch must come
+    from the audit, or a cumulative rebuilt today from a pre-reset audit would
+    read its old version in the new numbering.
+    """
+    cumulative = (meta.get("additional") or {}).get("cumulative") or {}
+    return str(cumulative.get("original_report_date") or meta.get("date") or "")
+
+
+def _post_reset(meta: dict) -> bool:
+    """True when the audit date falls in the post-reset numbering."""
+    date = _audit_date(meta)
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}", date)) and date[:10] >= VERSION_RESET_DATE
+
+
+def _gate(
+    meta: dict,
+    *,
+    legacy: tuple[int, int, int] | None = None,
+    current: tuple[int, int, int] | None = None,
+) -> bool:
+    """Does a version-gated rule apply to this report?
+
+    ``legacy`` is a pre-reset threshold; every post-reset release includes it.
+    ``current`` is a post-reset threshold; no pre-reset report meets it. A
+    report with no parseable harness_version is never gated (as before).
+    """
+    hv = _parse_harness_version(meta)
+    if hv is None:
+        return False
+    if _post_reset(meta):
+        return current is None or hv >= current
+    return legacy is not None and hv >= legacy
 
 
 @dataclass
@@ -270,7 +320,7 @@ def cross_validate(report: dict, result: ValidationResult):
     #    warning so pre-0.12.0 reports keep validating.
     meta = report.get("metadata", {})
     hv = _parse_harness_version(meta)
-    enforce = hv is not None and hv >= CANONICAL_ID_MIN_VERSION
+    enforce = _gate(meta, legacy=CANONICAL_ID_MIN_VERSION)
     commit = meta.get("commit", "")
     shortsha = re.match(r"^[a-f0-9]{7}", str(commit).lower())
     for i, f in enumerate(report.get("findings", [])):
@@ -288,19 +338,21 @@ def cross_validate(report: dict, result: ValidationResult):
             f"(e.g. EXAMPLE_PROXY-abc1234-001)"
         )
         if enforce:
-            result.error(msg + f" [harness_version {'.'.join(map(str, hv))} >= 0.12.0]")
+            result.error(
+                msg + f" [canonical IDs required: harness_version {'.'.join(map(str, hv))}]"
+            )
         else:
             result.warn(msg + " [legacy report — re-audit to migrate]")
     if enforce and not commit:
         result.error(
-            "metadata.commit is required for harness >= 0.12.0 "
+            "metadata.commit is required once canonical IDs apply "
             "(SHORTSHA component of canonical finding IDs)"
         )
 
     # 10. 0.15.0 consistency conventions. Hard-enforced when the report was
     #     produced by harness >= CONSISTENCY_MIN_VERSION; earlier reports keep
     #     validating (strict mode surfaces the equivalent warnings).
-    if hv is not None and hv >= CONSISTENCY_MIN_VERSION:
+    if _gate(meta, legacy=CONSISTENCY_MIN_VERSION):
         if "peach_isolation_review" not in report:
             result.error(
                 "peach_isolation_review is required for harness >= 0.15.0 — "
@@ -318,6 +370,9 @@ def cross_validate(report: dict, result: ValidationResult):
     # 11. Disposition-block consistency (cumulative reports produced by the
     #     track-findings skill; no-op for audit-stage reports).
     _cross_validate_dispositions(report, result)
+
+    # 12. Review-surface coverage (traust-contracts 0.56.0).
+    _cross_validate_review_surfaces(report, result)
 
 
 from traust_engine.ledger import compute_claim_hash, compute_event_id
@@ -587,6 +642,71 @@ def check_metadata_repository(report: dict, result: ValidationResult):
 
 
 _REPO_URL_RE = re.compile(r"^https://[a-z0-9.-]+/[^/]+/.+$", re.I)
+
+
+def _review_surfaces() -> list[str]:
+    from traust_contracts.paths import enum_dir
+
+    return json.loads((enum_dir() / "review-surface.json").read_text(encoding="utf-8"))["values"]
+
+
+def _cross_validate_review_surfaces(report: dict, result: ValidationResult):
+    """review_surface_coverage: required from REVIEW_SURFACE_MIN_VERSION on, and
+    every entry must point at something real in the report.
+
+    The schema checks the record's shape (all six surfaces, valid statuses,
+    finding_ids / note where required). These are the checks that need the
+    rest of the report:
+      finding       every finding_id is a finding in this report
+      negative      a negative_results entry whose area is the surface id
+                    (exactly, or followed by a space and a qualifier)
+      not_assessed  a metadata.additional.coverage_gaps entry with
+                    tool "review-surfaces" and system = the surface id
+    """
+    meta = report.get("metadata", {}) or {}
+    record = report.get("review_surface_coverage")
+    if record is None:
+        if meta.get("audit_profile") == "code" and _gate(meta, current=REVIEW_SURFACE_MIN_VERSION):
+            result.error(
+                "review_surface_coverage is required for code-profile audits from "
+                "traust 0.20.0 — record finding / negative / not_applicable / "
+                "not_assessed for each review surface"
+            )
+        return
+    if not isinstance(record, dict):
+        return  # schema validation reports the type error
+    finding_ids = {f.get("id") for f in report.get("findings", []) if isinstance(f, dict)}
+    areas = [
+        str(n.get("area", ""))
+        for n in report.get("negative_results", []) or []
+        if isinstance(n, dict)
+    ]
+    gaps = {
+        (g.get("tool"), g.get("system"))
+        for g in (meta.get("additional") or {}).get("coverage_gaps", []) or []
+        if isinstance(g, dict)
+    }
+    for surface in _review_surfaces():
+        entry = record.get(surface)
+        if not isinstance(entry, dict):
+            continue  # schema validation reports a missing surface
+        status = entry.get("status")
+        where = f"review_surface_coverage.{surface}"
+        if status == "finding":
+            for fid in entry.get("finding_ids") or []:
+                if fid not in finding_ids:
+                    result.error(f"{where}: finding_ids names {fid!r}, which is not in findings")
+        elif status == "negative":
+            if not any(a == surface or a.startswith(surface + " ") for a in areas):
+                result.error(
+                    f"{where}: status negative but no negative_results entry has "
+                    f"area {surface!r} — record what was examined"
+                )
+        elif status == "not_assessed" and ("review-surfaces", surface) not in gaps:
+            result.error(
+                f"{where}: status not_assessed but metadata.additional.coverage_gaps "
+                f"has no {{tool: review-surfaces, system: {surface}}} entry"
+            )
 
 
 def _default_signing_pubkey(pubkey: Path | None = None) -> str | None:
@@ -1448,11 +1568,9 @@ def strict_checks(report: dict, result: ValidationResult):
             "valid only for org-URL stub reports)"
         )
     meta_ds = report.get("metadata", {})
-    hv_ds = _parse_harness_version(meta_ds)
     if (
         meta_ds.get("audit_profile") == "code"
-        and hv_ds is not None
-        and hv_ds >= DETERMINISTIC_STEPS_MIN_VERSION
+        and _gate(meta_ds, legacy=DETERMINISTIC_STEPS_MIN_VERSION)
         and "deterministic_steps" not in (meta_ds.get("additional") or {})
     ):
         result.warn(
@@ -1478,7 +1596,6 @@ def strict_checks(report: dict, result: ValidationResult):
     if "positive_observations" not in es:
         result.warn("Strict: missing 'executive_summary.positive_observations'")
     meta = report.get("metadata", {})
-    hv = _parse_harness_version(meta)
     # Container-profile reports measure an image, not source — no LoC by design
     # (they record metadata.additional.sbom_packages instead).
     if meta.get("audit_profile") == "container":
@@ -1486,7 +1603,7 @@ def strict_checks(report: dict, result: ValidationResult):
             result.warn("Strict: container profile missing 'metadata.additional.sbom_packages'")
     elif "loc_reviewed" not in meta and "loc_breakdown" not in meta:
         result.warn("Strict: metadata missing 'loc_reviewed' / 'loc_breakdown'")
-    elif hv is not None and hv >= CONSISTENCY_MIN_VERSION and "loc_breakdown" not in meta:
+    elif _gate(meta, legacy=CONSISTENCY_MIN_VERSION) and "loc_breakdown" not in meta:
         result.warn(
             "Strict: metadata missing 'loc_breakdown' — per-language LoC "
             "counts feed the campaign dashboards"
@@ -1601,7 +1718,7 @@ def strict_checks(report: dict, result: ValidationResult):
         )
     # Category vocabulary (harness >= 0.15.0): free text is schema-valid but
     # off-vocabulary values fragment cross-report aggregation.
-    if hv is not None and hv >= CONSISTENCY_MIN_VERSION:
+    if _gate(meta, legacy=CONSISTENCY_MIN_VERSION):
         off_vocab = sorted(
             {
                 f["category"]
