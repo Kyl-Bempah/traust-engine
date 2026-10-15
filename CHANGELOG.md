@@ -2,6 +2,20 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.25.1]
+
+- **The validator detects three more artifact kinds by filename.**
+  `*-remediation-verification.json`, `*-refuted-register.json` and
+  `*-priv-profile.json` fell through to the audit-report schema, so every one
+  of them failed `traust reporting validate`, in a directory sweep or on its
+  own. They now validate against `verification.schema.json`,
+  `refuted-register.schema.json` and `operator-priv-profile.schema.json`.
+  - Verification reports get their existing cross-checks.
+  - Refuted registers and privilege profiles are not finding reports, so
+    they are schema-only, like `cloud-config-audit`. They skip the code-audit
+    cross-checks, the identity and repository checks, and strict mode.
+  - Directory sweeps still skip refuted registers.
+
 ## [0.25.0]
 
 - **Version gates read the audit date first, so they hold across the

@@ -1507,3 +1507,81 @@ class TestThreatModelArtifact(unittest.TestCase):
             {"boundary_id": "B1", "interface": "api", "kind": "http", "exposure": "public"}
         ]
         self.assertIn("## 10. Tenant boundaries", render.render_threat_model(populated))
+
+
+class TestArtifactKindDetection(unittest.TestCase):
+    """Artifacts that are not audit reports get their own schema by filename
+    and are not failed by the code-audit cross-checks."""
+
+    REFUTED_REGISTER = {
+        "source": "repo-triage.json",
+        "generated_at": "2026-01-01T00:00:00Z",
+        "entries": [
+            {
+                "finding_ref": "FIND-001",
+                "title": "Refuted claim",
+                "refute_reasons": ["misread_code"],
+                "tier": "countersign",
+                "evidence_refs": ["src/main.py:1"],
+                "asserted_at": "2026-01-01T00:00:00Z",
+                "asserted_by": "triage/1.0.0",
+                "note": "Execution evidence overrides.",
+            }
+        ],
+    }
+    PRIV_PROFILE = {
+        "repo": "example-operator",
+        "summary": {
+            "workloads": 1,
+            "privileged_or_host_workloads": 0,
+            "rbac_rules": 1,
+            "distinct_rule_triples": 1,
+            "distinct_cluster_triples": 0,
+            "cluster_scoped_rules": 0,
+            "scc_requests": [],
+            "wildcard_rules": 0,
+            "no_scc_request_recorded": True,
+        },
+    }
+
+    def test_each_kind_is_detected(self):
+        for name, schema in (
+            ("repo-remediation-verification.json", "verification.schema.json"),
+            ("repo-refuted-register.json", "refuted-register.schema.json"),
+            ("repo-priv-profile.json", "operator-priv-profile.schema.json"),
+            ("repo-operator-priv-profile.json", "operator-priv-profile.schema.json"),
+        ):
+            detected = validate.detect_schema_path(Path(name))
+            self.assertIsNotNone(detected, name)
+            self.assertEqual(detected.name, schema, name)
+
+    def _validate(self, name, document, strict=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / name
+            path.write_text(json.dumps(document), encoding="utf-8")
+            schema = load_schema(validate.detect_schema_path(path))
+            return validate.validate_report(
+                str(path), schema, strict=strict, registry=validate.build_registry()
+            )
+
+    def test_a_verification_report_passes_its_own_checks(self):
+        result = self._validate("repo-remediation-verification.json", _valid_verification_report())
+        self.assertTrue(result.passed, result.errors)
+
+    def test_registers_and_profiles_skip_the_audit_crosschecks(self):
+        """They have no severity_criteria or findings_summary, and must not
+        be failed for lacking them."""
+        for name, document in (
+            ("repo-refuted-register.json", self.REFUTED_REGISTER),
+            ("repo-priv-profile.json", self.PRIV_PROFILE),
+        ):
+            result = self._validate(name, document, strict=True)
+            self.assertTrue(result.passed, (name, result.errors))
+            self.assertEqual(result.warnings, [], name)
+
+    def test_the_schema_still_applies(self):
+        document = copy.deepcopy(self.REFUTED_REGISTER)
+        del document["entries"]
+        result = self._validate("repo-refuted-register.json", document)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("entries" in e for e in result.errors), result.errors)
