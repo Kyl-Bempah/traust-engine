@@ -1808,6 +1808,12 @@ def validate_report(
             # thing a schema cannot say: an OWASP rating's scores, levels
             # and severity must follow from its factors.
             cross_validate_threat_model(report, result)
+        elif "refuted-register" in sid or "operator-priv-profile" in sid:
+            # A refuted register (refutation worklist) and an operator
+            # privilege profile are not finding reports: the code-audit
+            # cross-checks (severity_criteria, findings_summary) do not fit
+            # them, so only the schema applies.
+            pass
         else:
             cross_validate(report, result)
 
@@ -1827,6 +1833,8 @@ def validate_report(
         # fingerprint, and its `provenance.target` is what records the
         # repository, not `metadata.repository`.
         "threat-model",
+        "refuted-register",
+        "operator-priv-profile",
     )
     if not any(k in sid for k in _non_audit):
         check_finding_identity(report, result)
@@ -1907,6 +1915,12 @@ def detect_schema_path(file_path: Path) -> Path | None:
         return SCHEMA_DIR / "threat-model.schema.json"
     if name.endswith("-impact-analysis.json"):
         return SCHEMA_DIR / "impact-analysis.schema.json"
+    if name.endswith("-remediation-verification.json"):
+        return SCHEMA_DIR / "verification.schema.json"
+    if name.endswith("-refuted-register.json"):
+        return SCHEMA_DIR / "refuted-register.schema.json"
+    if name.endswith("-priv-profile.json"):
+        return SCHEMA_DIR / "operator-priv-profile.schema.json"
     if name.endswith("-cloud-config-audit.json"):
         # Layer-2 cloud-config report: run_checkov.py --validate-report is
         # the canonical gate, but sweeps must not fail it against the
