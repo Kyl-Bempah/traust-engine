@@ -2,6 +2,16 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.22.1]
+
+- **`registry.models.stamp()` omits unknown values instead of writing
+  `null`.** A role missing from the registry used to produce
+  `"floor": null`, which traust-contracts 0.55.0 rejects, since it types
+  `metadata.additional.model_routing.floor` as a string. The stamp now
+  leaves out `floor`, and `registry_sha` when the registry has no source
+  sha, so every stamp validates against the report schema.
+- Pins traust-contracts 0.55.0 (`0f3298b`) and traust-ledger `a5bdf19`.
+
 ## [0.22.0]
 
 - **The gitleaks adapter no longer honours `gitleaks:allow` comments in the

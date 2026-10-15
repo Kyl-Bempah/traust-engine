@@ -45,6 +45,28 @@ class TestShippedRegistry(unittest.TestCase):
         self.assertEqual(len(s["registry_sha"]), 12)
         self.assertEqual(s["floor"], "sonnet-class")
 
+    def test_stamp_omits_floor_for_unregistered_role(self):
+        s = stamp(self.reg, "no-such-role", "claude-sonnet-5")
+        self.assertEqual(s["role"], "no-such-role")
+        self.assertNotIn("floor", s)
+        self.assertNotIn(None, s.values())
+
+    def test_stamp_validates_against_report_schema(self):
+        import json
+
+        from jsonschema import Draft202012Validator
+        from traust_contracts.paths import schema_dir
+
+        schema = json.loads((schema_dir() / "report.schema.json").read_text(encoding="utf-8"))
+        routing = schema["$defs"]["metadata"]["properties"]["additional"]["properties"][
+            "model_routing"
+        ]
+        for role in ("fact-judge", "no-such-role"):
+            errors = list(
+                Draft202012Validator(routing).iter_errors(stamp(self.reg, role, "claude-sonnet-5"))
+            )
+            self.assertEqual(errors, [], role)
+
     def test_spend_row_mythos_priced_from_rate_card(self):
         # rate card filled 2026-07-24: mythos-5 at 10/50 per MTok
         # (1M in = $10) + (100k out = $5) = $15

@@ -81,13 +81,19 @@ def resolve(reg: ModelRegistry, role: str, tier: str | None = None) -> str:
 
 
 def stamp(reg: ModelRegistry, role: str, model: str) -> dict:
+    """The report's ``metadata.additional.model_routing`` record.
+
+    Unknown values are omitted, never written as null: report.schema
+    (traust-contracts 0.55.0) types ``registry_sha`` and ``floor`` as strings,
+    so a role missing from the registry simply carries no floor.
+    """
     r = reg.roles.get(role)
-    return {
-        "role": role,
-        "model": model,
-        "registry_sha": reg.source_sha,
-        "floor": r.floor if r is not None else None,
-    }
+    out = {"role": role, "model": model}
+    if reg.source_sha:
+        out["registry_sha"] = reg.source_sha
+    if r is not None and r.floor:
+        out["floor"] = r.floor
+    return out
 
 
 CACHE_READ_MULT = 0.1  # published cache pricing relative to input
