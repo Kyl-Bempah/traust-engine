@@ -550,6 +550,37 @@ def load_rule_allowlist(spec: str | None) -> tuple[set | None, str | None]:
     return ids, src
 
 
+# Inline suppression comments (`# nosemgrep`, `// nosem: rule-id`) shipped by
+# the scanned target. The target is the code under audit, so its own
+# suppressions are repository content, not exemptions: the scan runs with
+# --disable-nosem and facts on such lines carry nosem_marked for the judge.
+NOSEM_RE = re.compile(r"\bnosem(?:grep)?\b", re.IGNORECASE)
+
+
+def _nosem_marked(extra: dict, target: Path, path: str, start: int, end: int) -> bool:
+    """True when the match, or the line just above it, carries a nosem comment.
+
+    Checks opengrep's matched ``lines`` first, then the checkout (the comment
+    may sit on the preceding line). Only the boolean leaves this function.
+    """
+    if NOSEM_RE.search(extra.get("lines") or ""):
+        return True
+    if not path or start < 1:
+        return False
+    file = Path(path) if Path(path).is_absolute() else target / path
+    first, last = max(1, start - 1), max(start, end)
+    try:
+        with file.open(encoding="utf-8", errors="replace") as fh:
+            for lineno, line in enumerate(fh, 1):
+                if lineno > last:
+                    break
+                if lineno >= first and NOSEM_RE.search(line):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def normalize(raw: dict, target: Path) -> tuple[list[dict], list[dict]]:
     facts = []
     for r in raw.get("results", []):
@@ -566,13 +597,15 @@ def normalize(raw: dict, target: Path) -> tuple[list[dict], list[dict]]:
             rel = str(Path(path).resolve().relative_to(target))
         except ValueError:
             rel = path
+        start = (r.get("start") or {}).get("line", 0)
+        end = (r.get("end") or {}).get("line", 0)
         facts.append(
             {
                 "rule_id": bare_rule_id(r.get("check_id", "?")),
                 "severity_hint": SEVERITY_HINT.get(extra.get("severity", ""), "low"),
                 "file": rel,
-                "start_line": (r.get("start") or {}).get("line", 0),
-                "end_line": (r.get("end") or {}).get("line", 0),
+                "start_line": start,
+                "end_line": end,
                 "message": (extra.get("message") or "")[:400],
                 "cwe": [str(c) for c in cwes],
                 "owasp": [str(o) for o in owasp],
@@ -580,6 +613,7 @@ def normalize(raw: dict, target: Path) -> tuple[list[dict], list[dict]]:
                 "taint": "dataflow_trace" in extra,
                 "snippet": (extra.get("lines") or "")[:200],
                 "test_path": bool(TEST_PATH_RE.search(rel)),
+                "nosem_marked": _nosem_marked(extra, target, path, start, end),
             }
         )
     errors = [
@@ -621,7 +655,9 @@ def _execute_opengrep_scan(
             supplemental.append(supp["name"])
             supp_allow.update(supp["rules"])
 
-    cmd = [opengrep_bin, "scan", "--json", "--quiet"]
+    # --disable-nosem: the target's own nosem comments never suppress a fact
+    # (see NOSEM_RE); normalize() flags those facts as nosem_marked instead.
+    cmd = [opengrep_bin, "scan", "--json", "--quiet", "--disable-nosem"]
     for r in rules:
         for c in r["config"]:
             cmd += ["--config", c]
@@ -686,6 +722,17 @@ def _execute_opengrep_scan(
     }
 
 
+def _describe(fact: dict) -> str:
+    text = fact.get("message") or ""
+    if fact.get("nosem_marked"):
+        note = (
+            "The target marks this line with a nosem comment; a suppression "
+            "shipped by the audited repo is not an exemption, judge the fact."
+        )
+        text = f"{text} ({note})" if text else note
+    return text
+
+
 def _facts_to_findings(facts: list[dict]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     for fact in facts:
@@ -715,7 +762,7 @@ def _facts_to_findings(facts: list[dict]) -> list[dict[str, Any]]:
                 "severity": map_severity(fact.get("severity_hint", "low")),
                 "cwes": fact.get("cwe", []),
                 "locations": [loc],
-                "description": fact["message"],
+                "description": _describe(fact),
                 "evidence": evidence,
                 "category": fact["rule_id"],
                 "origin": "opengrep",

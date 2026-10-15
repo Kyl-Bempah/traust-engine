@@ -2,6 +2,17 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.24.0]
+
+- **The opengrep adapter no longer honours the scanned target's own `nosem`
+  comments.** opengrep, like semgrep, drops a match on a line ending in
+  `# nosemgrep` (or `// nosem`) by default, so an audited repository could
+  hide its own facts. The adapter passes `--disable-nosem`. Facts whose
+  match, or the line just above it, carries such a comment get
+  `nosem_marked: true` and a note in the finding description, so the judge
+  sees the marker and weighs it. Same doctrine as the gitleaks
+  `inline_allow` change in 0.22.0.
+
 ## [0.23.0]
 
 - **The bundled rule packs are the only copy, and they are current.** The
