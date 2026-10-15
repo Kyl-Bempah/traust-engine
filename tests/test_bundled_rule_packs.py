@@ -94,3 +94,57 @@ class TestBundledGitleaksConfig(unittest.TestCase):
             result = G.scan(root)  # no config, no loc: the bundled default
         found = {f.id if hasattr(f, "id") else f["id"] for f in result.findings}
         self.assertIn("gitleaks/traust-openshift-sha256-token", found)
+
+
+class TestNosemComments(unittest.TestCase):
+    """A target's own nosem comments never suppress a fact (they flag it)."""
+
+    def test_normalize_flags_a_nosem_comment_on_the_match(self):
+        raw = {
+            "results": [
+                {
+                    "check_id": "x.traust-demo",
+                    "path": "app.py",
+                    "start": {"line": 1},
+                    "end": {"line": 1},
+                    "extra": {"lines": "danger()  # nosemgrep", "message": "m"},
+                }
+            ]
+        }
+        facts, _ = O.normalize(raw, Path("/nonexistent"))
+        self.assertTrue(facts[0]["nosem_marked"])
+        self.assertIn("nosem", O._facts_to_findings(facts)[0]["description"])
+
+    def test_normalize_reads_a_nosem_comment_on_the_line_above(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "app.go").write_text("// nosem: traust-demo\ndanger()\n", encoding="utf-8")
+            raw = {
+                "results": [
+                    {
+                        "check_id": "traust-demo",
+                        "path": str(root / "app.go"),
+                        "start": {"line": 2},
+                        "end": {"line": 2},
+                        "extra": {"lines": "danger()", "message": "m"},
+                    }
+                ]
+            }
+            facts, _ = O.normalize(raw, root)
+        self.assertTrue(facts[0]["nosem_marked"])
+
+    def test_unmarked_fact_is_not_flagged(self):
+        raw = {"results": [{"check_id": "r", "path": "a.py", "extra": {"lines": "x()"}}]}
+        facts, _ = O.normalize(raw, Path("/nonexistent"))
+        self.assertFalse(facts[0]["nosem_marked"])
+
+    @unittest.skipUnless(shutil.which("opengrep"), "opengrep not on PATH")
+    def test_default_scan_reports_a_fact_the_target_marked_nosem(self):
+        code, rule = CANARIES["app.py"]
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            marked = code.replace("False})\n", "False})  # nosemgrep\n")
+            (root / "app.py").write_text(marked, encoding="utf-8")
+            result = O.scan(root)
+        found = {f.id if hasattr(f, "id") else f["id"] for f in result.findings}
+        self.assertIn(f"opengrep/{rule}", found)
