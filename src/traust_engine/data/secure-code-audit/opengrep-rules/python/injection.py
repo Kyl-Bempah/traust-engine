@@ -51,3 +51,62 @@ def render_static_template():
     import jinja2
     # ok: traust-python-injection-jinja2-template-taint
     return jinja2.Template("hello {{ name }}").render(name="world")
+
+
+def owned_items_orm(Item, owner_name, session):
+    # ruleid: traust-python-injection-like-wildcard-unescaped
+    session.query(Item).filter(Item.name.like(owner_name + "+%"))
+
+    # ruleid: traust-python-injection-like-wildcard-unescaped
+    session.query(Item).filter(Item.name.ilike(f"{owner_name}/%"))
+
+    # ruleid: traust-python-injection-like-wildcard-unescaped
+    Item.select().where(Item.name ** (owner_name + "+%"))
+
+    # ruleid: traust-python-injection-like-wildcard-unescaped
+    Item.select().where(Item.name ** "{}+%".format(owner_name))
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    session.query(Item).filter(Item.name.like(escape_like(owner_name) + "+%", escape="\\"))
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    Item.select().where(Item.name ** (escape_wildcards(owner_name) + "+%"))
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    session.query(Item).filter(Item.owner_id == owner_name)
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    session.query(Item).filter(Item.name.like("fixed-prefix-%"))
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    total = base ** exponent
+    return total
+
+
+def owned_items_sql(cursor, owner_name):
+    # ruleid: traust-python-injection-like-wildcard-unescaped
+    cursor.execute("SELECT id FROM item WHERE name LIKE '" + owner_name + "+%'")
+
+    # ruleid: traust-python-injection-like-wildcard-unescaped
+    cursor.execute(f"SELECT id FROM item WHERE name ILIKE '{owner_name}%'")
+
+    # ruleid: traust-python-injection-like-wildcard-unescaped
+    cursor.execute("SELECT id FROM item WHERE name LIKE %s", (owner_name + "%",))
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    cursor.execute("SELECT id FROM item WHERE name LIKE %s ESCAPE '\\'", (escape_like(owner_name) + "%",))
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    cursor.execute("SELECT id FROM item WHERE name = %s", (owner_name,))
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    cursor.execute("SELECT id FROM item WHERE name LIKE %s", (owner_name,))
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    cursor.execute("SELECT id FROM item WHERE owner = '" + owner_name + "'")
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    cursor.execute(f"CREATE TABLE tmp_{owner_name} (LIKE base_{owner_name} INCLUDING ALL)")
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    cursor.execute(f"CREATE TABLE {owner_name}_copy (LIKE {owner_name} INCLUDING DEFAULTS)")

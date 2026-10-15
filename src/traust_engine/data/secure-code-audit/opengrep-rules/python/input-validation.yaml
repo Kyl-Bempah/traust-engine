@@ -69,3 +69,58 @@ rules:
           - pattern: pickle.load(...)
           - pattern: marshal.loads(...)
           - pattern: cPickle.loads(...)
+          # v1.8: the object-oriented and third-party entry points the
+          # function-call sinks above never matched
+          - pattern: pickle.Unpickler(...).load()
+          - pattern: Unpickler(...).load()
+          - patterns:
+              - pattern: $CLS(...).load()
+              - pattern-either:
+                  - pattern-inside: |
+                      class $CLS(..., pickle.Unpickler, ...):
+                          ...
+                      ...
+                  - pattern-inside: |
+                      class $CLS(..., Unpickler, ...):
+                          ...
+                      ...
+          - pattern: dill.loads(...)
+          - pattern: dill.load(...)
+          - pattern: jsonpickle.decode(...)
+          - pattern: shelve.open(...)
+
+  # v1.8 — inventory, not a vulnerability claim. A restricted unpickler
+  # (an Unpickler subclass overriding find_class) is still a pickle
+  # deserialization site: its safety rests entirely on the allowlist. The
+  # measured failure this closes is a grep-based negative result that
+  # searched for `pickle.load(` and reported deserialization "absent" in a
+  # tree whose only pickle site used this shape.
+  - id: traust-python-input-validation-restricted-unpickler-inventory
+    languages: [python]
+    severity: INFO
+    message: >-
+      Restricted-unpickler site: an Unpickler subclass overrides
+      find_class. Pickle deserialization is present here, gated only by
+      the allowlist. Verify the allowlist is exact (module AND name, no
+      prefix or wildcard matching), that no allowed class reaches a
+      dangerous __reduce__/__setstate__, and where the pickled bytes come
+      from. Record this site in negative_results rather than claiming the
+      deserialization class is absent. CWE-502.
+    metadata:
+      cwe: ["CWE-502"]
+      category: input-validation
+      asvs: ["V5"]
+      confidence: LOW
+      references:
+        - "seeded defect shape: deserialization sink completeness"
+    patterns:
+      - pattern: |
+          def find_class(...):
+              ...
+      - pattern-either:
+          - pattern-inside: |
+              class $C(..., pickle.Unpickler, ...):
+                  ...
+          - pattern-inside: |
+              class $C(..., Unpickler, ...):
+                  ...

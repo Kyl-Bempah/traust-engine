@@ -23,10 +23,11 @@ restricts commercial redistribution (see docs/external-dependencies.md,
     p/<pack> | r/<ruleset>         Semgrep registry shorthand — allowed for
                                    internal runs; license varies per pack
 
-Default (no --rules): the traust-authored pack at ``locations.opengrep_rules``,
-``OPENGREP_RULES_DIR``, ``RULE_PACK_DIR``, or the bundled wheel copy (our IP,
-the campaign's triage-ledger ground truth), filtered to the language
-directories present in the target. The opengrep-rules fork remains
+Default (no --rules): the traust-authored pack bundled in this package
+(``traust_engine/data/secure-code-audit/opengrep-rules``), unless
+``locations.opengrep_rules`` points elsewhere, filtered to the language
+directories present in the target. The bundled copy is the only copy: no
+consumer needs to configure it. The opengrep-rules fork remains
 available as an internal-run supplement:
 `--rules https://github.com/opengrep/opengrep-rules@<sha>` (its license
 note is carried into the output for metadata.tools). `--config auto` is

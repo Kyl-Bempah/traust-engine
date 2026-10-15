@@ -2,6 +2,36 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.23.0]
+
+- **The bundled rule packs are the only copy, and they are current.** The
+  opengrep pack and gitleaks config under
+  `src/traust_engine/data/secure-code-audit/` are what every default run
+  loads (no rule-pack argument, no `locations` override), and traust now
+  deletes its own copies. This release brings the opengrep pack to rule
+  pack v1.8: seven new rules plus wider deserialization sinks.
+  - `traust-python-injection-like-wildcard-unescaped` and
+    `traust-go-injection-like-wildcard-unescaped` (CWE-155): a LIKE/ILIKE
+    pattern built from a run-time value with `%`/`_` left live.
+  - `traust-python-authentication-jwt-signature-unverified` and
+    `traust-go-authentication-jwt-signature-unverified` (CWE-347): token
+    decoding with signature verification switched off, including under a
+    test/debug flag.
+  - `traust-python-input-validation-pickle-loads-taint` gains
+    `Unpickler(...).load()`, `dill`, `jsonpickle` and `shelve` sinks;
+    `traust-python-input-validation-restricted-unpickler-inventory` lists
+    restricted unpicklers.
+  - `traust-python-cryptography-secret-compare-not-constant-time` and
+    `traust-go-cryptography-secret-compare-not-constant-time` (CWE-208).
+- **`tests/test_bundled_rule_packs.py` pins the default.** With no argument
+  and no config the adapters resolve to the bundled copies; every rule file
+  has a fixture; every language passes `opengrep test`; and a default
+  `opengrep.scan()` / `gitleaks.scan()` on canary code reports recent rules.
+  The scanner-dependent tests are not marked `integration`, so the pre-push
+  hook runs them wherever opengrep and gitleaks are installed.
+- The opengrep adapter docstring no longer lists `OPENGREP_RULES_DIR` /
+  `RULE_PACK_DIR`, which the code never read.
+
 ## [0.22.1]
 
 - **`registry.models.stamp()` omits unknown values instead of writing

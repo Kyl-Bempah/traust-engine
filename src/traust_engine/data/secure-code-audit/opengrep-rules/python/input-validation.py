@@ -53,3 +53,62 @@ def load_trusted_cache(path):
     # ok: traust-python-input-validation-pickle-loads-taint
     with open(path, "rb") as f:
         return pickle.load(f)
+
+
+def restore_with_unpickler(request):
+    import io
+    import pickle
+
+    raw = request.get_data()
+    # ruleid: traust-python-input-validation-pickle-loads-taint
+    return pickle.Unpickler(io.BytesIO(raw)).load()
+
+
+def restore_third_party(request):
+    import dill
+    import jsonpickle
+
+    blob = request.form.get("state")
+    # ruleid: traust-python-input-validation-pickle-loads-taint
+    first = dill.loads(blob)
+    # ruleid: traust-python-input-validation-pickle-loads-taint
+    second = jsonpickle.decode(blob)
+    return first, second
+
+
+def open_shelf(request):
+    import shelve
+
+    name = request.form.get("shelf")
+    # ruleid: traust-python-input-validation-pickle-loads-taint
+    return shelve.open(name)
+
+
+import io
+import pickle
+
+
+class AllowListUnpickler(pickle.Unpickler):
+    # ruleid: traust-python-input-validation-restricted-unpickler-inventory
+    def find_class(self, module, name):
+        if (module, name) == ("collections", "OrderedDict"):
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(name)
+
+
+def restore_subclass(request):
+    raw = request.body
+    # ruleid: traust-python-input-validation-pickle-loads-taint
+    return AllowListUnpickler(io.BytesIO(raw)).load()
+
+
+def restore_subclass_trusted(path):
+    with open(path, "rb") as f:
+        # ok: traust-python-input-validation-pickle-loads-taint
+        return AllowListUnpickler(f).load()
+
+
+class PlainLoader:
+    # ok: traust-python-input-validation-restricted-unpickler-inventory
+    def find_class(self, module, name):
+        return None
