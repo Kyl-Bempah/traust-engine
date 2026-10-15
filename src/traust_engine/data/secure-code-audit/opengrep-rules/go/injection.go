@@ -2,6 +2,8 @@ package rules
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"net/http"
 	"os/exec"
 )
@@ -42,3 +44,31 @@ func shellC(dynamic string) {
 	// ok: traust-go-injection-shell-c
 	exec.Command("ls", "-la", dynamic)
 }
+
+func ownedItems(ctx context.Context, db *sql.DB, ownerName string) {
+	// ruleid: traust-go-injection-like-wildcard-unescaped
+	db.Query("SELECT id FROM item WHERE name LIKE '" + ownerName + "+%'")
+
+	// ruleid: traust-go-injection-like-wildcard-unescaped
+	db.QueryContext(ctx, fmt.Sprintf("SELECT id FROM item WHERE name ILIKE '%s%%'", ownerName))
+
+	// ruleid: traust-go-injection-like-wildcard-unescaped
+	db.Query("SELECT id FROM item WHERE name LIKE $1", ownerName+"%")
+
+	// ruleid: traust-go-injection-like-wildcard-unescaped
+	db.QueryContext(ctx, "SELECT id FROM item WHERE name LIKE $1", "%"+ownerName+"%")
+
+	// ok: traust-go-injection-like-wildcard-unescaped
+	db.Query("SELECT id FROM item WHERE name LIKE $1 ESCAPE '\\'", escapeLike(ownerName)+"%")
+
+	// ok: traust-go-injection-like-wildcard-unescaped
+	db.Query("SELECT id FROM item WHERE name = $1", ownerName)
+
+	// ok: traust-go-injection-like-wildcard-unescaped
+	db.Query("SELECT id FROM item WHERE name LIKE $1", ownerName)
+
+	// ok: traust-go-injection-like-wildcard-unescaped
+	db.Query("SELECT id FROM item WHERE owner = '" + ownerName + "'")
+}
+
+func escapeLike(s string) string { return s }

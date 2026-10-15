@@ -119,3 +119,87 @@ rules:
       - pattern-either:
           - pattern: jinja2.Template(...)
           - pattern: jinja2.Environment(...).from_string(...)
+
+  # v1.8 ownership-resolution tranche. A LIKE/ILIKE pattern assembled from
+  # a run-time value leaves `_` and `%` in that value live as wildcards, so
+  # a lookup meant as "objects owned by X" also returns objects owned by
+  # names X matches. Primary CWE-155 (improper neutralization of wildcards
+  # or matching symbols) names the exact mechanism; CWE-943 (improper
+  # neutralization in data query logic) is the broader class. The value
+  # need not be request-derived: a self-chosen account or namespace name
+  # is enough, so this is a pattern rule, not a taint rule.
+  - id: traust-python-injection-like-wildcard-unescaped
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A LIKE/ILIKE pattern is built from a run-time value without escaping
+      `%` and `_` — wildcard characters in the value widen the match, so a
+      lookup scoped to one owner or prefix can return rows that belong to
+      others (names commonly allow `_`). Escape the value (`\`, `%`, `_`)
+      and pass an ESCAPE clause or the ORM's escape argument, or match on
+      an exact key or foreign key instead of a name pattern. CWE-155.
+    metadata:
+      cwe: ["CWE-155", "CWE-943"]
+      category: injection
+      asvs: ["V1"]
+      confidence: MEDIUM
+      references:
+        - "seeded defect shape: ownership resolved by an unescaped name pattern"
+    pattern-either:
+      # ORM pattern operators: SQLAlchemy like/ilike, peewee ** (ILIKE)
+      - patterns:
+          - pattern-either:
+              - pattern: $COL.like($P, ...)
+              - pattern: $COL.ilike($P, ...)
+              - pattern: $COL.not_like($P, ...)
+              - pattern: $COL.not_ilike($P, ...)
+              - pattern: $COL ** $P
+          - metavariable-pattern:
+              metavariable: $P
+              patterns:
+                - pattern-either:
+                    - pattern: $X + "..."
+                    - pattern: '"..." + $X'
+                    - pattern: f"...{$X}..."
+                    - pattern: '"..." % $X'
+                    - pattern: '"...".format(...)'
+                - pattern-not: '"..." + "..."'
+                - pattern-not-regex: (?i)escape
+          - pattern-not: $COL.like(..., escape=$E, ...)
+          - pattern-not: $COL.ilike(..., escape=$E, ...)
+      # raw SQL whose text carries LIKE and is assembled at run time
+      - patterns:
+          - pattern-either:
+              - pattern: $CUR.execute($Q, ...)
+              - pattern: $CUR.executemany($Q, ...)
+              - pattern: $DB.raw($Q, ...)
+              - pattern: text($Q)
+              - pattern: sqlalchemy.text($Q)
+          - metavariable-pattern:
+              metavariable: $Q
+              pattern-either:
+                - pattern: $A + $B
+                - pattern: f"...{$X}..."
+                - pattern: $A % $B
+                - pattern: $A.format(...)
+          - metavariable-regex:
+              metavariable: $Q
+              regex: '(?is).*(?<!\()\bi?like\s+(?:\x27|\x22|%s|%\(|\$\d|\?|:[a-z_]|\{(?![^}]*\}\s+(?:including|excluding))|concat\b|\|\|)'
+          - pattern-not-regex: (?i)\bescape\b
+      # bound parameter that is itself a wildcard concatenation
+      - patterns:
+          - pattern-either:
+              - pattern: $CUR.execute("$SQL", $ARGS, ...)
+              - pattern: $CUR.executemany("$SQL", $ARGS, ...)
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: '(?is).*(?<!\()\bi?like\s+(?:\x27|\x22|%s|%\(|\$\d|\?|:[a-z_]|\{(?![^}]*\}\s+(?:including|excluding))|concat\b|\|\|)'
+          - metavariable-pattern:
+              metavariable: $ARGS
+              pattern-either:
+                - pattern: $X + "%"
+                - pattern: '"%" + $X'
+                - pattern: f"{$X}%"
+                - pattern: f"%{$X}%"
+                - pattern: f"%{$X}"
+          - pattern-not-regex: (?i)\bescape\b

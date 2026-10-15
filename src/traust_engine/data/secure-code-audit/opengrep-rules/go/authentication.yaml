@@ -55,3 +55,59 @@ rules:
             $T.Header.Del($HN)
           }
           ...
+
+  # v1.8 credential-acceptance tranche. Go twin of
+  # traust-python-authentication-jwt-signature-unverified: a parse that
+  # skips signature verification, a key function that hands back no key,
+  # or the unsigned algorithm admitted — each lets the token's author pick
+  # its claims. ParseUnverified has a legitimate use (read the issuer or
+  # key id to choose the key, then verify), so it carries MEDIUM
+  # confidence and the judge checks that a verified parse follows.
+  - id: traust-go-authentication-jwt-signature-unverified
+    languages: [go]
+    severity: ERROR
+    message: >-
+      A JWT is accepted without signature verification — ParseUnverified,
+      a key function that returns no key, or the unsigned `none` algorithm
+      allowed. Whoever writes the token chooses its subject and claims.
+      This is a finding even behind a test/debug switch: trace where that
+      switch is set, including its shipped default. Verify every token
+      against a pinned key and an explicit WithValidMethods list; if a
+      claim must be read before the key is known, use it only to select
+      the key, then verify. CWE-347.
+    metadata:
+      cwe: ["CWE-347", "CWE-287"]
+      category: authentication
+      asvs: ["V9"]
+      confidence: MEDIUM
+      references:
+        - "seeded defect shape: token signature check skipped"
+    pattern-either:
+      - pattern: $P.ParseUnverified(...)
+      - pattern: jwt.UnsafeAllowNoneSignatureType
+      - pattern: jwt.SigningMethodNone
+      - patterns:
+          - pattern: jwt.WithValidMethods($METHODS)
+          - metavariable-regex:
+              metavariable: $METHODS
+              regex: (?is).*"none"
+      - pattern: |
+          jwt.Parse($TOK, func($T *jwt.Token) (interface{}, error) {
+              ...
+              return nil, nil
+          }, ...)
+      - pattern: |
+          jwt.ParseWithClaims($TOK, $CL, func($T *jwt.Token) (interface{}, error) {
+              ...
+              return nil, nil
+          }, ...)
+      - pattern: |
+          $PARSER.Parse($TOK, func($T *jwt.Token) (interface{}, error) {
+              ...
+              return nil, nil
+          })
+      - pattern: |
+          $PARSER.ParseWithClaims($TOK, $CL, func($T *jwt.Token) (interface{}, error) {
+              ...
+              return nil, nil
+          })

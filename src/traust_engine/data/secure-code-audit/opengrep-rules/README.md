@@ -65,3 +65,42 @@ DSN URLs with embedded credentials are detected by the gitleaks extension in
 `../gitleaks-rules/gitleaks-default.toml` (gitleaks reads every file type — `.env`,
 `toml`, `properties`, not just code). The yaml tranche here covers the same
 miss class in helm values, docker-compose, and operator CR samples.
+v1.8 (2026-10-14) — the **authentication, ownership and crypto-hygiene
+tranche**: credential acceptance, ownership resolution, security-relevant
+configuration flags, and deserialization-sink completeness. These are
+seeded rules, not mined ones: each encodes a defect shape that review
+missed and no existing rule could surface. Their precision is unmeasured
+until their facts are judged (`/mine-ledger`).
+
+- `traust-python-injection-like-wildcard-unescaped`,
+  `traust-go-injection-like-wildcard-unescaped` (CWE-155, class CWE-943):
+  a LIKE/ILIKE pattern assembled from a run-time value, through an ORM
+  pattern operator (SQLAlchemy `like`/`ilike`, peewee `**`), raw SQL text,
+  or a bound argument that is itself a wildcard concatenation. An escape
+  helper or an ESCAPE clause sanitizes. Pattern rules, not taint: a
+  self-chosen account or namespace name is enough to widen the match.
+- `traust-python-authentication-jwt-signature-unverified` (new
+  `python/authentication.yaml`) and
+  `traust-go-authentication-jwt-signature-unverified` (CWE-347): token
+  decoding with signature verification switched off, including the
+  conditional shape where an options dict is mutated under a test/debug
+  flag, the legacy `verify=False` keyword, the `none` algorithm, a Go key
+  function that returns no key, and `ParseUnverified` (MEDIUM: it has a
+  legitimate key-selection use).
+- `traust-python-input-validation-pickle-loads-taint` gained sinks
+  (`Unpickler(...).load()` including subclasses, `dill`, `jsonpickle`,
+  `shelve`), and `traust-python-input-validation-restricted-unpickler-inventory`
+  (INFO, LOW) inventories every `Unpickler` subclass that overrides
+  `find_class`. A restricted unpickler is still a deserialization site, so
+  a negative result must name it rather than report the class absent.
+- `traust-python-cryptography-secret-compare-not-constant-time`,
+  `traust-go-cryptography-secret-compare-not-constant-time` (CWE-208,
+  LOW): `==`/`!=` (and Go `bytes.Equal`) on token-, password-, digest-,
+  signature-, MAC- or API-key-named operands. Literal and nil comparisons
+  and metadata-named operands (`*_type`, `*_id`, `*_len`, …) are excluded.
+
+Engine note (v1.8): `metavariable-regex` is anchored at the start of the
+bound text, so a "contains" test needs a leading `.*` (`(?is).*\blike\b`),
+and it cannot sit directly under `pattern-either` — wrap each branch in
+its own `patterns:`.
+
