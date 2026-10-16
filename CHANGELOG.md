@@ -2,6 +2,18 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.25.2]
+
+- **Directory sweeps no longer crash on skill working files.**
+  `collect_report_files` skips hidden directories below the swept root
+  (`.triage-state/`, `.threat-model-state/` and similar), which hold skill
+  working state, not artifacts.
+- **The identity, repository and strict checks run only on a report-shaped
+  document:** an object whose `metadata` is an object and whose `findings` is
+  a list of objects. On anything else they raised (`'str' object has no
+  attribute 'get'`), which aborted the sweep for the whole directory. Such a
+  document still fails on its schema errors.
+
 ## [0.25.1]
 
 - **The validator detects three more artifact kinds by filename.**
