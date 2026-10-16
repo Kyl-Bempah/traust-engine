@@ -441,6 +441,40 @@ class TestDirectoryValidation(unittest.TestCase):
             self.assertIn("top-level.json", names)
             self.assertEqual(len(files), 2)
 
+    def test_collect_report_files_skips_hidden_directories(self):
+        """Skill working state (.triage-state/ etc.) is not an artifact."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir) / "org" / "repo"
+            (repo / ".triage-state").mkdir(parents=True)
+            (repo / "repo-security-audit.json").write_text("{}", encoding="utf-8")
+            (repo / ".triage-state" / "phase1.json").write_text("{}", encoding="utf-8")
+            names = [f.name for f in collect_report_files(tmpdir)]
+            self.assertEqual(names, ["repo-security-audit.json"])
+
+    def test_collect_report_files_inside_a_hidden_root(self):
+        """Only directories below the swept root count, so sweeping a path
+        that itself sits under a dot-directory still finds its files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / ".cache" / "findings"
+            root.mkdir(parents=True)
+            (root / "repo-security-audit.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(len(collect_report_files(str(root))), 1)
+
+    def test_a_document_that_is_not_report_shaped_fails_without_raising(self):
+        """The identity and strict checks read findings directly; on a
+        malformed document they used to raise and abort the whole sweep."""
+        for document in (
+            {"phase": 1, "findings": 3},
+            {"phase": 1, "findings": ["FIND-001"]},
+            {"metadata": "x", "findings": []},
+            [1, 2, 3],
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "phase1.json"
+                path.write_text(json.dumps(document), encoding="utf-8")
+                r = validate_report(str(path), SCHEMA, strict=True)
+                self.assertFalse(r.passed, document)
+
 
 # ---------------------------------------------------------------------------
 # Renderer smoke test

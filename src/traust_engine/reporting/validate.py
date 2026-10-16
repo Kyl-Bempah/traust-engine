@@ -1836,13 +1836,27 @@ def validate_report(
         "refuted-register",
         "operator-priv-profile",
     )
-    if not any(k in sid for k in _non_audit):
+    # These checks read findings and metadata directly. On a document that
+    # is not report-shaped they would raise and abort a whole directory
+    # sweep; its schema errors already say what is wrong.
+    if not any(k in sid for k in _non_audit) and _report_shaped(report):
         check_finding_identity(report, result)
         check_metadata_repository(report, result)
-    if strict and not any(k in sid for k in _non_audit):
-        strict_checks(report, result)
+        if strict:
+            strict_checks(report, result)
 
     return result
+
+
+def _report_shaped(report) -> bool:
+    """An object whose `metadata` (if present) is an object and whose
+    `findings` (if present) is a list of objects."""
+    if not isinstance(report, dict):
+        return False
+    if not isinstance(report.get("metadata", {}), dict):
+        return False
+    findings = report.get("findings", [])
+    return isinstance(findings, list) and all(isinstance(f, dict) for f in findings)
 
 
 def collect_report_files(path: str) -> list[Path]:
@@ -1850,8 +1864,13 @@ def collect_report_files(path: str) -> list[Path]:
     if target.is_dir():
         # Refuted registers are operational worklists (countersign/fuzzing
         # inputs), not schema'd reports — skip them in directory sweeps.
+        # Hidden directories (.triage-state/, .threat-model-state/, ...)
+        # hold skill working files, not artifacts.
         return sorted(
-            p for p in target.rglob("*.json") if not p.name.endswith("-refuted-register.json")
+            p
+            for p in target.rglob("*.json")
+            if not p.name.endswith("-refuted-register.json")
+            and not any(part.startswith(".") for part in p.relative_to(target).parts[:-1])
         )
     elif target.is_file():
         return [target]
