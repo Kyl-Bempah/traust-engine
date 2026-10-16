@@ -117,3 +117,118 @@ class TestCrossChecks:
     def test_not_assessed_needs_a_coverage_gap(self):
         record = coverage(**{"outbound-fetch": {"status": "not_assessed", "note": "scoped"}})
         assert any("coverage_gaps" in e for e in errors(report(record)))
+
+
+class TestRpmProfile:
+    def test_required_from_the_extended_release(self):
+        m = meta("0.21.0", "2026-10-20", profile="rpm")
+        assert any("rpm-profile" in e for e in errors(report(m=m)))
+
+    @pytest.mark.parametrize(
+        "m",
+        [
+            meta("0.20.2", "2026-10-20", profile="rpm"),  # before the rpm release
+            meta("0.21.0", "2026-10-20", profile="container"),  # never for containers
+        ],
+    )
+    def test_not_required_elsewhere(self, m):
+        assert errors(report(m=m)) == []
+
+    def test_an_audit_may_record_out_of_scope(self):
+        record = coverage(**{"security-flags": {"status": "out_of_scope", "note": "scoped"}})
+        assert errors(report(record)) == []
+
+
+def scan_errors(record, *, hv="0.21.0", date="2026-10-20", ids=()):
+    result = V.ValidationResult("x")
+    V._cross_validate_scan_review_surfaces(
+        record, result, kind="vuln-findings", harness_version=hv, date=date, ids=set(ids)
+    )
+    return result.errors
+
+
+def scan_record(**overrides):
+    record = {s: {"status": "out_of_scope", "note": "untouched"} for s in SURFACES}
+    record.update(overrides)
+    return record
+
+
+class TestScanRecords:
+    def test_required_from_the_extended_release(self):
+        assert any("required" in e for e in scan_errors(None))
+
+    @pytest.mark.parametrize(
+        ("hv", "date"),
+        [
+            ("0.20.2", "2026-10-20"),  # before the release
+            ("0.186.2", "2026-07-21"),  # pre-reset numbering
+            (None, "2026-10-20"),  # no harness_version: never gated
+        ],
+    )
+    def test_not_required_before_it(self, hv, date):
+        assert scan_errors(None, hv=hv, date=date) == []
+
+    def test_scanned_at_timestamps_read_as_dates(self):
+        assert any("required" in e for e in scan_errors(None, date="2026-10-20T12:00:00Z"))
+
+    def test_finding_ids_must_be_findings_of_the_scan(self):
+        record = scan_record(
+            **{"outbound-fetch": {"status": "finding", "finding_ids": ["VS-001", "NOPE"]}}
+        )
+        found = scan_errors(record, ids={"VS-001"})
+        assert len(found) == 1 and "'NOPE'" in found[0]
+
+    def test_a_consistent_record_passes(self):
+        record = scan_record(
+            **{
+                "outbound-fetch": {"status": "finding", "finding_ids": ["VS-001"]},
+                "scope-enforcement": {"status": "negative", "note": "3 new routes, all guarded"},
+            }
+        )
+        assert scan_errors(record, ids={"VS-001"}) == []
+
+
+class TestVerificationReports:
+    """Through validate_report, with the verification schema."""
+
+    @staticmethod
+    def _validate(document):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "repo-remediation-verification.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            schema = V.load_schema(V.detect_schema_path(path))
+            return V.validate_report(str(path), schema, registry=V.build_registry())
+
+    @staticmethod
+    def _report(hv="0.21.0"):
+        from test_validate_report import _valid_verification_report
+
+        document = _valid_verification_report()
+        document["metadata"]["harness_version"] = hv
+        document["metadata"]["date"] = "2026-10-20"
+        return document
+
+    def test_a_current_report_without_the_record_fails(self):
+        result = self._validate(self._report())
+        assert any("review_surface_coverage is required" in e for e in result.errors)
+
+    def test_regressions_and_original_findings_can_be_named(self):
+        document = self._report()
+        document["review_surface_coverage"] = scan_record(
+            **{
+                "outbound-fetch": {
+                    "status": "finding",
+                    "finding_ids": ["EXAMPLE_APP-1234567-REG-001", "EXAMPLE_APP-abcdef0-001"],
+                }
+            }
+        )
+        result = self._validate(document)
+        assert result.passed, result.errors
+
+    def test_an_older_report_needs_no_record(self):
+        result = self._validate(self._report(hv="0.20.2"))
+        assert result.passed, result.errors
