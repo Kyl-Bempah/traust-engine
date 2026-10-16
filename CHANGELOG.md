@@ -2,6 +2,25 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.26.0]
+
+- **Review-surface coverage is checked on the scans that follow an audit,
+  and on rpm audits** (traust-contracts 0.57.0).
+  - `vuln-findings` and `verification` reports from traust 0.21.0 on must
+    carry `review_surface_coverage`. The schema already checks its shape,
+    including the note that every status except `finding` needs. The validator
+    adds one check: each `finding_ids` entry must be a finding of the scan
+    itself. For vuln-findings that means `findings[].id`; for verification,
+    `regressions[].id` or a re-checked original finding's `original_id`.
+  - rpm-profile audits from traust 0.21.0 on must carry the record, as
+    code-profile audits have since 0.20.0. Container audits still don't.
+  - Gating is epoch-aware (`_gate`) and reads each scan's own fields: the
+    top-level `metadata.harness_version`, with `metadata.date` for
+    verification and `scanned_at` for vuln-findings. Earlier reports are
+    unaffected.
+  - The audit requirement's error now names the profile and lists
+    `out_of_scope` among the statuses.
+
 ## [0.25.2]
 
 - **Directory sweeps no longer crash on skill working files.**
