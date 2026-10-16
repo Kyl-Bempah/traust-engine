@@ -9,7 +9,14 @@ from traust_contracts import ModelRegistry
 from traust_engine import locations
 from traust_engine._ops_base import ContextOps
 from traust_engine.registry import feeds as feed_ops
-from traust_engine.registry.models import cost_usd, resolve, spend_row, stamp, validate
+from traust_engine.registry.models import (
+    cost_usd,
+    long_prompt_thresholds,
+    resolve,
+    spend_row,
+    stamp,
+    validate,
+)
 
 
 class ModelsOps(ContextOps):
@@ -32,10 +39,21 @@ class ModelsOps(ContextOps):
         tok_out: int,
         cache_read: int = 0,
         cache_creation: int = 0,
+        long_prompt: dict | None = None,
     ) -> float | None:
         return cost_usd(
-            self._ctx.model_registry, model, tok_in, tok_out, cache_read, cache_creation
+            self._ctx.model_registry,
+            model,
+            tok_in,
+            tok_out,
+            cache_read,
+            cache_creation,
+            long_prompt,
         )
+
+    def long_prompt_thresholds(self) -> dict[str, int]:
+        """{model id: above_tokens} for models with long-prompt pricing."""
+        return long_prompt_thresholds(self._ctx.model_registry)
 
     def spend_row(
         self,

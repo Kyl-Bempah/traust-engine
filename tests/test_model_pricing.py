@@ -142,3 +142,15 @@ def test_both_collectors_carry_the_split_into_rows(tmp_path):
     assert usd == pytest.approx(
         150_000 / M * 0.5 + 10 / M * 2.5 + 1_000 / M * 0.1 + 10 / M * 0.5, abs=1e-4
     )
+
+
+def test_the_engine_facade_passes_long_prompt_through():
+    from types import SimpleNamespace
+
+    from traust_engine.registry.ops import ModelsOps
+
+    ops = ModelsOps.__new__(ModelsOps)
+    ops._ctx = SimpleNamespace(model_registry=_reg())
+    lp = {"tokens_in": M, "tokens_out": 0, "cache_read": 0, "cache_creation": 0}
+    assert ops.cost_usd("tiered", M, 0, long_prompt=lp) == pytest.approx(0.5)
+    assert ops.long_prompt_thresholds() == {"tiered": 100_000}

@@ -19,6 +19,8 @@ All notable changes to traust-engine are documented here.
   - **Reports:** every report that re-derives cost from a row
     (`metrics/spend.py`) passes it through.
   - New helpers: `long_prompt_thresholds()` and `collect_spend.add_usage()`.
+    The `HarnessEngine.models` facade exposes `long_prompt_thresholds()`, and
+    its `cost_usd` takes `long_prompt`.
   - Old rows have no `long_prompt` block and keep base pricing.
 - **`out_of_scope` only on diff scans.** A vuln-findings
   `review_surface_coverage` entry of `out_of_scope` is an error unless the
