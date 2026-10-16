@@ -64,6 +64,7 @@ def monthly_budget_section(
             int(m.get("tokens_out") or 0),
             int(m.get("cache_read") or 0),
             int(m.get("cache_creation") or 0),
+            long_prompt=m.get("long_prompt"),
         )
         if c is None:
             mo["unpriced"].add(m.get("model", "?"))
@@ -183,6 +184,7 @@ def lane_attribution_section(
                     int(m.get("tokens_out") or 0),
                     int(m.get("cache_read") or 0),
                     int(m.get("cache_creation") or 0),
+                    long_prompt=m.get("long_prompt"),
                 )
             except Exception:
                 derived = None
@@ -324,6 +326,7 @@ def build(
                 int(m.get("tokens_out") or 0),
                 int(m.get("cache_read") or 0),
                 int(m.get("cache_creation") or 0),
+                long_prompt=m.get("long_prompt"),
             )
             if c is None:
                 unpriced.add(m.get("model", "?"))
@@ -353,6 +356,7 @@ def build(
                 int(m.get("tokens_out") or 0),
                 int(m.get("cache_read") or 0),
                 int(m.get("cache_creation") or 0),
+                long_prompt=m.get("long_prompt"),
             )
             L.append(
                 f"| {m.get('date')} | {m.get('model')} | "

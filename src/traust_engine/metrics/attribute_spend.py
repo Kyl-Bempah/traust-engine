@@ -130,8 +130,11 @@ def collect_attributed(
     day: str | None = None,
     month: str | None = None,
     valid: set[str] | None = None,
+    thresholds: dict[str, int] | None = None,
 ) -> dict:
-    """-> {date: {skill: {model: {tokens..., messages, sessions}}}}.
+    """-> {date: {skill: {model: {tokens..., messages, sessions[, long_prompt]}}}}.
+
+    ``thresholds``: model -> long-prompt threshold; see collect_spend.add_usage.
 
     Walks each session IN ORDER so a mid-session skill invocation
     attributes the messages that follow it, not the whole file. Usage
@@ -171,8 +174,7 @@ def collect_attributed(
                     if month and not ts.startswith(month):
                         continue
                     a = agg[ts][current][model]
-                    for k in TOKEN_KEYS:
-                        a[k] += usage.get(k) or 0
+                    css.add_usage(a, usage, (thresholds or {}).get(model))
                     a["messages"] += 1
                     a["sessions"].add(sid)
     return agg
@@ -275,6 +277,7 @@ def append_rows(ws: Path, agg: dict, reg=None, journal: Path | None = None) -> i
                         a["output_tokens"],
                         a["cache_read_input_tokens"],
                         a["cache_creation_input_tokens"],
+                        a.get("long_prompt"),
                     )
                 except Exception:
                     usd = None
@@ -288,6 +291,7 @@ def append_rows(ws: Path, agg: dict, reg=None, journal: Path | None = None) -> i
                         "tokens_out": a["output_tokens"],
                         "cache_read": a["cache_read_input_tokens"],
                         "cache_creation": a["cache_creation_input_tokens"],
+                        **({"long_prompt": dict(a["long_prompt"])} if a.get("long_prompt") else {}),
                         "messages": a["messages"],
                         "sessions": len(a["sessions"]),
                         "cost_usd": usd,
@@ -328,6 +332,7 @@ def cost_by_skill(agg: dict, reg=None) -> tuple[dict, set]:
                         a["output_tokens"],
                         a["cache_read_input_tokens"],
                         a["cache_creation_input_tokens"],
+                        a.get("long_prompt"),
                     )
                 except Exception:
                     usd = None

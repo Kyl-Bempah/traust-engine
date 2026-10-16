@@ -720,14 +720,23 @@ def _cross_validate_review_surfaces(report: dict, result: ValidationResult):
 
 
 def _cross_validate_scan_review_surfaces(
-    record, result: ValidationResult, *, kind: str, harness_version, date, ids: set
+    record,
+    result: ValidationResult,
+    *,
+    kind: str,
+    harness_version,
+    date,
+    ids: set,
+    diff_scoped: bool | None = None,
 ):
     """review_surface_coverage on a vuln-findings or verification report.
 
     Required from REVIEW_SURFACE_EXTENDED_MIN_VERSION on. The schema checks the
     shape (all six surfaces, valid statuses, a note on every status but
-    finding). The one check that needs the rest of the report: every
-    finding_id names a finding of this scan (``ids``).
+    finding). The checks that need the rest of the report: every finding_id
+    names a finding of this scan (``ids``), and ``out_of_scope`` appears only
+    on a diff-scoped scan. ``diff_scoped`` is None when the report kind is
+    always diff-scoped (verification), else whether this scan was.
     """
     gate_meta = {"date": date or "", "additional": {"harness_version": harness_version}}
     if record is None:
@@ -743,7 +752,15 @@ def _cross_validate_scan_review_surfaces(
         return  # schema validation reports the type error
     for surface in _review_surfaces():
         entry = record.get(surface)
-        if not isinstance(entry, dict) or entry.get("status") != "finding":
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") == "out_of_scope" and diff_scoped is False:
+            result.error(
+                f"review_surface_coverage.{surface}: out_of_scope on a full scan — "
+                "out_of_scope is only for a diff-scoped scan "
+                "(metadata.additional.coverage_diff); record what the full scan found"
+            )
+        if entry.get("status") != "finding":
             continue
         for fid in entry.get("finding_ids") or []:
             if fid not in ids:
@@ -1239,6 +1256,7 @@ def cross_validate_vuln_findings(report: dict, result: ValidationResult):
         harness_version=meta.get("harness_version"),
         date=report.get("scanned_at"),
         ids={f.get("id") for f in findings if isinstance(f, dict)},
+        diff_scoped=isinstance((meta.get("additional") or {}).get("coverage_diff"), dict),
     )
 
     # 1. Finding ID uniqueness
