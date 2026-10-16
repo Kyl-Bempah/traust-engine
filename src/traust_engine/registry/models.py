@@ -96,8 +96,15 @@ def stamp(reg: ModelRegistry, role: str, model: str) -> dict:
     return out
 
 
-CACHE_READ_MULT = 0.1  # published cache pricing relative to input
-CACHE_WRITE_MULT = 1.25
+CACHE_READ_MULT = 0.1  # standard cache-hit price relative to input
+CACHE_WRITE_MULT = 1.25  # 5-minute cache writes, the same for every current model
+#: Token fields of a long_prompt usage block (a metrics row's own names).
+LONG_PROMPT_KEYS = ("tokens_in", "tokens_out", "cache_read", "cache_creation")
+
+
+def long_prompt_thresholds(reg: ModelRegistry) -> dict[str, int]:
+    """{model id: above_tokens} for every model with long-prompt pricing."""
+    return {mid: m.long_prompt.above_tokens for mid, m in reg.all_models().items() if m.long_prompt}
 
 
 def cost_usd(
@@ -107,21 +114,42 @@ def cost_usd(
     tok_out: int,
     cache_read: int = 0,
     cache_creation: int = 0,
+    long_prompt: dict | None = None,
 ) -> float | None:
-    """Cache-aware cost from registry list prices; None when unpriced."""
+    """Cache-aware cost from registry list prices; None when unpriced.
+
+    Cache hits use the model's ``cache_read_multiplier`` (0.1 when unset).
+    ``long_prompt`` is the part of these tokens that came from requests over
+    the model's long-prompt threshold, keyed by LONG_PROMPT_KEYS; it is
+    priced at the model's long-prompt rates and the rest at base rates.
+    Without it every token is priced at base rates.
+    """
     m = reg.all_models().get(model)
     if m is None:
         return None
     pin, pout = m.price_per_mtok_in, m.price_per_mtok_out
     if pin is None or pout is None:
         return None
-    return round(
-        tok_in / 1e6 * pin
-        + tok_out / 1e6 * pout
-        + cache_read / 1e6 * pin * CACHE_READ_MULT
-        + cache_creation / 1e6 * pin * CACHE_WRITE_MULT,
-        4,
-    )
+    read_mult = m.cache_read_multiplier if m.cache_read_multiplier is not None else CACHE_READ_MULT
+
+    def price(p_in: float, p_out: float, i: int, o: int, r: int, w: int) -> float:
+        return (
+            i / 1e6 * p_in
+            + o / 1e6 * p_out
+            + r / 1e6 * p_in * read_mult
+            + w / 1e6 * p_in * CACHE_WRITE_MULT
+        )
+
+    lp = long_prompt or {}
+    long_part = [max(0, int(lp.get(k) or 0)) for k in LONG_PROMPT_KEYS]
+    whole = [tok_in, tok_out, cache_read, cache_creation]
+    base_part = [max(0, w - lng) for w, lng in zip(whole, long_part, strict=True)]
+    total = price(pin, pout, *base_part)
+    if any(long_part):
+        tier = m.long_prompt
+        p_in, p_out = (tier.price_per_mtok_in, tier.price_per_mtok_out) if tier else (pin, pout)
+        total += price(p_in, p_out, *long_part)
+    return round(total, 4)
 
 
 def spend_row(

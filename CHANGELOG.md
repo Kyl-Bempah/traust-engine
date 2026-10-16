@@ -2,6 +2,32 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.27.0]
+
+- **Per-model cache rates and long-prompt pricing** (traust-contracts 0.59.0).
+  - `cost_usd` prices cache hits at the model's `cache_read_multiplier`
+    (0.1 when unset).
+  - It takes an optional `long_prompt` usage block (`tokens_in`,
+    `tokens_out`, `cache_read`, `cache_creation`): the tokens from requests
+    over the model's long-prompt threshold. Those are priced at the
+    long-prompt rates and the rest at base rates.
+  - **Collectors:** both transcript collectors (`collect_spend.collect`,
+    `attribute_spend.collect_attributed`) judge each request on its own. A
+    request whose prompt (input, cache reads and cache writes) is over the
+    model's threshold is also counted in the bucket's `long_prompt`, and
+    metrics rows carry it when it's non-zero.
+  - **Reports:** every report that re-derives cost from a row
+    (`metrics/spend.py`) passes it through.
+  - New helpers: `long_prompt_thresholds()` and `collect_spend.add_usage()`.
+    The `HarnessEngine.models` facade exposes `long_prompt_thresholds()`, and
+    its `cost_usd` takes `long_prompt`.
+  - Old rows have no `long_prompt` block and keep base pricing.
+- **`out_of_scope` only on diff scans.** A vuln-findings
+  `review_surface_coverage` entry of `out_of_scope` is an error unless the
+  report carries `metadata.additional.coverage_diff` (traust-contracts
+  0.58.0). Verification reports are always diff-scoped.
+- Pins traust-contracts `f7869db` (0.59.0) and traust-ledger `2ffc506`.
+
 ## [0.26.0]
 
 - **Review-surface coverage is checked on the scans that follow an audit,

@@ -232,3 +232,32 @@ class TestVerificationReports:
     def test_an_older_report_needs_no_record(self):
         result = self._validate(self._report(hv="0.20.2"))
         assert result.passed, result.errors
+
+
+class TestOutOfScopeOnlyOnDiffScans:
+    def _errors(self, diff_scoped):
+        return scan_errors_with(scan_record(), diff_scoped=diff_scoped)
+
+    def test_a_full_scan_may_not_use_out_of_scope(self):
+        found = self._errors(False)
+        assert len(found) == len(SURFACES) and all("full scan" in e for e in found)
+
+    def test_a_diff_scan_may(self):
+        assert self._errors(True) == []
+
+    def test_a_verification_is_always_diff_scoped(self):
+        assert self._errors(None) == []
+
+
+def scan_errors_with(record, *, diff_scoped):
+    result = V.ValidationResult("x")
+    V._cross_validate_scan_review_surfaces(
+        record,
+        result,
+        kind="vuln-findings",
+        harness_version="0.21.0",
+        date="2026-10-20",
+        ids=set(),
+        diff_scoped=diff_scoped,
+    )
+    return result.errors
