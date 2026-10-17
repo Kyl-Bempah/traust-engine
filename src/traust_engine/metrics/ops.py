@@ -139,7 +139,8 @@ class MetricsOps(ContextOps):
     # --- SLA views -----------------------------------------------------------
 
     def default_sla_policy(self) -> Path:
-        return self._progress_tracker() / "configs" / "sla-policy.yaml"
+        """The deployment's SLA policy: ``sla-policy.yaml`` in the config home."""
+        return self._config_file("sla-policy.yaml")
 
     def sla_dashboard_dir(self) -> Path:
         return self._progress_tracker() / "metrics" / "dashboards" / "sla"

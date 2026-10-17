@@ -2,6 +2,27 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.31.0]
+
+- **Nothing reads `progress-tracker/configs/` any more.** Deployment config
+  lives in the config home (`TRAUST_CONFIG_HOME`); public reference data
+  ships in the package.
+  - **SLA policy:** `metrics.default_sla_policy()` is `sla-policy.yaml` in the
+    config home. When it's missing, it raises `DeploymentConfigMissing`
+    naming traust's `config/sla-policy.example.yaml`; it never falls back to
+    another tree. `--policy` still overrides.
+  - **Compliance scope:** `compliance.scope_registry()` and
+    `scope.default_scope_path()` point at `compliance-scope.yaml` in the
+    config home. The file may not exist until a scope is declared.
+  - **Compliance reference data ships in the engine** (`data/compliance/`,
+    reached with `assets.compliance_data_dir()`): the NIST 800-53 rev5 spine,
+    the 800-53B High and Moderate profiles, the PCI DSS v4, SOC 2 and GDPR
+    catalogs, their provenance, and the harness's control-to-check mapping
+    (`compliance-mapping.yaml`). A deployment that needs a different mapping
+    passes `--registry`.
+- `compliance.dashboard.build()` drops its `progress_tracker` argument, which
+  it used only to find the scope registry.
+
 ## [0.30.0]
 
 - **Section 5 (Deprioritized) carries review-surface tags.** traust-contracts

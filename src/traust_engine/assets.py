@@ -1,8 +1,10 @@
 """Engine-owned assets: the engine's own version and its bundled scanner data.
 
 NOT configuration and NOT injected: these are intrinsic to the engine package —
-its version (from package metadata) and the opengrep rule pack + gitleaks config
-that ship *inside* the wheel, versioned with the code. An operator never
+its version (from package metadata), the opengrep rule pack + gitleaks config,
+and the compliance reference data (NIST 800-53 spine and profiles, framework
+catalogs, the control-to-check mapping) that ship *inside* the wheel,
+versioned with the code. An operator never
 configures them; they do not vary per estate.
 
 Located via ``importlib`` (metadata + resources), never ``Path(__file__)``
@@ -41,3 +43,14 @@ def default_gitleaks_config() -> Path:
     return (
         _package_root() / "data" / "secure-code-audit" / "gitleaks-rules" / "gitleaks-default.toml"
     )
+
+
+def compliance_data_dir() -> Path:
+    """Bundled compliance reference data (ships inside the package).
+
+    Public framework data with no estate content: the NIST 800-53 rev5 spine,
+    the 800-53B profiles, the PCI DSS / SOC 2 / GDPR catalogs, their
+    provenance, and the harness's control-to-check mapping
+    (``compliance-mapping.yaml``).
+    """
+    return _package_root() / "data" / "compliance"
