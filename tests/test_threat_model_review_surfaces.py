@@ -2,7 +2,7 @@
 
 The JSON is the artifact; the `.md` is rendered from it, linted as the prose
 contract, and parsed back by the corpus. A `review_surfaces` tag on a threat
-or entry point (traust-contracts 0.57.0) must show in the rendering, pass the
+or entry point (traust-contracts 0.57.0), or on a deprioritized threat (0.60.0), must show in the rendering, pass the
 linter, and come back out of the parser.
 """
 
@@ -126,3 +126,44 @@ def test_the_corpus_parser_reads_the_tags_back(tmp_path):
     assert by_id["T1"]["review_surfaces"] == ["credential-acceptance"]
     assert "review_surfaces" not in by_id["T2"]
     assert json.loads(json.dumps(parsed))  # still plain JSON
+
+
+def _with_deprioritized(rows):
+    document = copy.deepcopy(DOC)
+    document["deprioritized"] = rows
+    return document
+
+
+def test_section_5_tags_render_and_lint(tmp_path):
+    document = _with_deprioritized(
+        [
+            {
+                "threat": "Webhook replay",
+                "reason": "no inbound webhooks",
+                "review_surfaces": ["credential-acceptance"],
+            },
+            {"threat": "physical access", "reason": "out of scope"},
+        ]
+    )
+    path = _md(tmp_path, document)
+    header, rows = _rows(path.read_text(), "| threat | reason |")
+    assert header == ["threat", "reason", "review_surfaces"]
+    assert rows[0]["review_surfaces"] == "credential-acceptance"
+    assert rows[1]["review_surfaces"] == ""
+    assert lint.lint_file(path)[0] == []
+
+
+def test_untagged_section_5_keeps_two_columns(tmp_path):
+    document = _with_deprioritized([{"threat": "physical access", "reason": "out of scope"}])
+    header, _ = _rows(_md(tmp_path, document).read_text(), "| threat | reason |")
+    assert header == ["threat", "reason"]
+
+
+def test_the_linter_rejects_an_unknown_section_5_surface(tmp_path):
+    document = _with_deprioritized(
+        [{"threat": "Webhook replay", "reason": "n/a", "review_surfaces": ["outbound-fetch"]}]
+    )
+    path = _md(tmp_path, document)
+    path.write_text(path.read_text().replace("| outbound-fetch |", "| made-up-surface |"))
+    errors, _ = lint.lint_file(path)
+    assert any("section 5" in e and "made-up-surface" in e for e in errors), errors
