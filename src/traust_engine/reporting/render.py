@@ -550,6 +550,9 @@ def render_threat_model(document: dict) -> str:
         threats = [{**t, **threat_rating.threat_cells(t)} for t in threats]
     if any(t.get("isolation_dimensions") for t in threats):
         columns = (*columns, "isolation_dimensions")
+    # Optional trailing column, written only when some threat is tagged.
+    if any(t.get("review_surfaces") for t in threats):
+        columns = (*columns, "review_surfaces")
 
     system = document.get("system", "")
     lines: list[str] = [f"# Threat Model: {system}", ""]
@@ -571,10 +574,15 @@ def render_threat_model(document: dict) -> str:
     lines += [""]
 
     lines += ["## 3. Entry points & trust boundaries", ""]
-    lines += _tm_table(
-        ("entry_point", "description", "trust_boundary", "reachable_assets"),
-        document.get("entry_points") or [],
+    entry_points = document.get("entry_points") or []
+    entry_columns = (
+        "entry_point",
+        "description",
+        "trust_boundary",
+        "reachable_assets",
+        *(("review_surfaces",) if any(e.get("review_surfaces") for e in entry_points) else ()),
     )
+    lines += _tm_table(entry_columns, entry_points)
     lines += [""]
 
     lines += ["## 4. Threats", ""]
