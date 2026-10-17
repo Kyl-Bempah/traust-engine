@@ -5,9 +5,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
 import yaml
+from traust_contracts import DeploymentConfigMissing
 
 from traust_engine import HarnessEngine
+from traust_engine.assets import compliance_data_dir
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "config"
 
@@ -69,12 +72,36 @@ def test_metrics_spend_build_uses_configured_paths(tmp_path):
 
 def test_metrics_sla_paths_from_context(tmp_path):
     pt = tmp_path / "estate-pt"
-    pt.mkdir()
     (pt / "configs").mkdir(parents=True)
+    (pt / "configs" / "sla-policy.yaml").write_text("ignored: true\n", encoding="utf-8")
     home = _home_with_progress_tracker(tmp_path, pt)
     h = HarnessEngine.load(config_home=home)
-    assert h.metrics.default_sla_policy() == pt / "configs" / "sla-policy.yaml"
+    # The policy is deployment config: the config home, never progress-tracker.
+    assert h.metrics.default_sla_policy() == home / "sla-policy.yaml"
     assert h.metrics.sla_dashboard_dir() == pt / "metrics" / "dashboards" / "sla"
+
+
+def test_a_missing_sla_policy_names_the_template(tmp_path):
+    home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
+    (home / "sla-policy.yaml").unlink()
+    h = HarnessEngine.load(config_home=home)
+    with pytest.raises(DeploymentConfigMissing, match=r"config/sla-policy\.example\.yaml"):
+        h.metrics.default_sla_policy()
+
+
+def test_compliance_reference_data_ships_with_the_engine():
+    data = compliance_data_dir()
+    for name in (
+        "compliance-mapping.yaml",
+        "spine-800-53-rev5.json",
+        "profile-800-53b-high.json",
+        "profile-800-53b-moderate.json",
+        "provenance.json",
+        "catalog-pci-dss-v4.yaml",
+        "catalog-soc2-tsc.yaml",
+        "catalog-gdpr-technical.yaml",
+    ):
+        assert (data / name).is_file(), name
 
 
 def test_two_engines_are_isolated_by_their_context(tmp_path):
@@ -200,9 +227,9 @@ def test_compliance_ops_use_configured_paths(tmp_path):
     ar = tmp_path / "analysis-results"
     (ar / "compliance").mkdir(parents=True)
     (ar / "graph").mkdir(parents=True)
-    scope_dir = pt / "configs" / "compliance"
-    scope_dir.mkdir(parents=True)
-    scope_path = scope_dir / "compliance-scope.yaml"
+    pt.mkdir()
+    home = _home_with_progress_tracker(tmp_path, pt)
+    scope_path = home / "compliance-scope.yaml"
     scope_path.write_text(
         yaml.safe_dump(
             {
@@ -224,7 +251,6 @@ def test_compliance_ops_use_configured_paths(tmp_path):
     graph_path = ar / "graph" / "repo-graph.json"
     graph_path.write_text('{"nodes":[],"edges":[]}', encoding="utf-8")
 
-    home = _home_with_progress_tracker(tmp_path, pt)
     (home / "locations.yaml").write_text(
         yaml.safe_dump({"progress_tracker": str(pt), "analysis_results": str(ar)}),
         encoding="utf-8",

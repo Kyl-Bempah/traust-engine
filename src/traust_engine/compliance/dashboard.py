@@ -38,10 +38,6 @@ from pathlib import Path
 from traust_contracts import CorpusConfig
 
 
-def _progress_tracker(progress_tracker: Path | None = None) -> Path | None:
-    return progress_tracker
-
-
 def collect_assessments(root: Path) -> list[dict]:
     from traust_contracts.models import ComplianceAssessment
 
@@ -218,8 +214,9 @@ def build(
     cfg: CorpusConfig,
     scope_path: Path | None = None,
     graph_path: Path | None = None,
-    progress_tracker: Path | None = None,
 ) -> dict:
+    from traust_engine.compliance.scope import default_scope_path
+
     docs = collect_assessments(assessments_dir)
     sel = latest_per_target_framework(docs)
     by_tid: dict[str, dict] = {}
@@ -294,15 +291,7 @@ def build(
         },
         "targets": targets,
         "boundary_coverage": boundary_coverage(
-            scope_path
-            or (
-                _progress_tracker(progress_tracker)
-                / "configs"
-                / "compliance"
-                / "compliance-scope.yaml"
-                if _progress_tracker(progress_tracker)
-                else None
-            ),
+            scope_path or default_scope_path(),
             graph_path,
             findings_db,
             docs,

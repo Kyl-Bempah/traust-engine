@@ -385,13 +385,12 @@ def test_metrics_build_sla_view_without_feeds_cache(tmp_path):
     pt = tmp_path / "pt"
     ar = tmp_path / "ar"
     pt.mkdir()
-    (pt / "configs").mkdir(parents=True)
     ar.mkdir()
     (home / "locations.yaml").write_text(
         yaml.safe_dump({"progress_tracker": str(pt), "analysis_results": str(ar)}),
         encoding="utf-8",
     )
-    policy_path = pt / "configs" / "sla-policy.yaml"
+    policy_path = home / "sla-policy.yaml"
     policy_path.write_text(yaml.safe_dump(POLICY), encoding="utf-8")
     db = _mk_db(tmp_path)
 
