@@ -174,6 +174,7 @@ def _surface_errors(where: str, cell: str) -> list[str]:
 
 
 DEPRI_COLUMNS = ["threat", "reason"]
+DEPRI_COLUMNS_SURFACES = [*DEPRI_COLUMNS, "review_surfaces"]
 MITIG_COLUMNS = ["mitigation", "threat_ids", "closes_class", "effort"]
 UPDATE_HISTORY_COLUMNS = ["date", "changes", "reason"]
 
@@ -477,8 +478,15 @@ def lint_file(path, strict=False):
     if b is not None:
         depri_text = "\n".join(b)
         cols, rows = parse_table(b)
-        if cols is not None and cols != DEPRI_COLUMNS:
-            errors.append(f"section 5 columns must be {DEPRI_COLUMNS}, got {cols}")
+        if cols is not None and cols not in (DEPRI_COLUMNS, DEPRI_COLUMNS_SURFACES):
+            errors.append(
+                f"section 5 columns must be {DEPRI_COLUMNS} "
+                f"(optionally + ['review_surfaces']), got {cols}"
+            )
+        if cols == DEPRI_COLUMNS_SURFACES:
+            for r in rows:
+                if r and r[0] and len(r) == len(cols):
+                    errors += _surface_errors(f"section 5 '{r[0]}'", r[-1])
 
     # -- Coverage invariant --------------------------------------------------
     surfaces_joined = " ".join(surface_cells).lower()

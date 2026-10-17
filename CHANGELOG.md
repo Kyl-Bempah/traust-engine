@@ -2,6 +2,17 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.30.0]
+
+- **Section 5 (Deprioritized) carries review-surface tags.** traust-contracts
+  0.60.0 lets a deprioritized threat carry `review_surfaces`. The renderer adds
+  a trailing `review_surfaces` column to section 5 when any row is tagged (an
+  untagged section renders as before), and the linter accepts that column and
+  checks each value against the enum.
+- **Pins traust-contracts 0.60.0 and traust-ledger 0.11.3.** The vuln-findings
+  schema now enforces the full-scan `out_of_scope` rule itself; this
+  validator's cross-check stays and reports the same rule.
+
 ## [0.29.0]
 
 - **Threat-model review-surface tags survive the Markdown.** The rendered

@@ -590,7 +590,13 @@ def render_threat_model(document: dict) -> str:
     lines += [""]
 
     lines += ["## 5. Deprioritized", ""]
-    lines += _tm_table(("threat", "reason"), document.get("deprioritized") or [])
+    deprioritized = document.get("deprioritized") or []
+    depri_columns = (
+        "threat",
+        "reason",
+        *(("review_surfaces",) if any(d.get("review_surfaces") for d in deprioritized) else ()),
+    )
+    lines += _tm_table(depri_columns, deprioritized)
     lines += [""]
 
     questions = document.get("open_questions") or []
