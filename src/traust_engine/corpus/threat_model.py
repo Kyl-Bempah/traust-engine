@@ -100,6 +100,10 @@ def parse_threats(path: Path, root: Path, subject_id: str | None = None) -> dict
         dimensions = _split(row.get("isolation_dimensions", ""))
         if dimensions:
             threat["isolation_dimensions"] = dimensions
+        # Trailing OPTIONAL column: the review surfaces the threat sits on.
+        surfaces = _split(row.get("review_surfaces", ""))
+        if surfaces:
+            threat["review_surfaces"] = surfaces
         threats.append(threat)
 
     if not threats:

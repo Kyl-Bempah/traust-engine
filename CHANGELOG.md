@@ -2,6 +2,21 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.29.0]
+
+- **Threat-model review-surface tags survive the Markdown.** The rendered
+  `<repo>-threat-model.md` used to drop `review_surfaces`
+  (traust-contracts 0.57.0), so a reader of the `.md` couldn't see which
+  threats and entry points sit on a review surface.
+  - **Renderer:** adds a trailing `review_surfaces` column to section 3
+    (entry points) and section 4 (threats) when any row carries tags. An
+    untagged model renders exactly as before.
+  - **Linter** (the prose contract): accepts that optional trailing column
+    in both sections and checks every value against the `review_surface`
+    enum.
+  - **Corpus parser** (`parse_threats`): reads the tags back, so the
+    round trip stays lossless.
+
 ## [0.28.0]
 
 - **Python rule pack v1.9: two misses from the `team-notes` recall-fixture
