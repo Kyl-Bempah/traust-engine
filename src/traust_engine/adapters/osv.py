@@ -224,8 +224,10 @@ LOCKFILES = {
     "package-lock.json",
     "npm-shrinkwrap.json",
     "pnpm-lock.yaml",
+    "yarn.lock",
     "poetry.lock",
     "Pipfile.lock",
+    "uv.lock",
     "gradle.lockfile",
     "Cargo.lock",
     "Gemfile.lock",
@@ -283,7 +285,17 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
         (str(Path(rel).parent), eco) for rel, eco, _ in manifests if Path(rel).name in LOCKFILES
     }
     packages: dict[tuple[str, str, str], dict] = {}
-    stats = {"manifests": 0, "unparsed": [], "unpinned_skipped": 0, "superseded_by_lockfile": 0}
+    stats = {
+        "manifests": 0,
+        "unparsed": [],
+        "unpinned_skipped": 0,
+        "superseded_by_lockfile": 0,
+        # manifests with no lockfile beside them: their direct declarations
+        # are queried at the declared floor, but the transitive tree is not
+        # resolved (owner decision 2026-10-20, option c: reported as a
+        # coverage gap now; resolution through deps.dev may follow)
+        "unresolved_manifests": [],
+    }
 
     def add(eco: str, name: str, version: str, src: str, basis: str) -> None:
         version = version.strip()
@@ -325,8 +337,14 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
         except Exception:  # a malformed file is reported, never fatal
             stats["unparsed"].append(rel)
             continue
-        pinned_requirements = name.startswith("requirements") and _requirements_all_pinned(text)
-        basis = "locked" if name in LOCKFILES or pinned_requirements else "manifest-floor"
+        pinned_requirements = "requirements" in name.lower() and _requirements_all_pinned(text)
+        # a workflow's action refs are exactly what runs: nothing to resolve
+        exact = name in LOCKFILES or pinned_requirements or eco == "actions"
+        basis = "locked" if exact else "manifest-floor"
+        if not exact:
+            stats["unresolved_manifests"].append(
+                {"path": rel, "ecosystem": osv_eco, "declarations": len(deps)}
+            )
         for dep_name, version, _indirect in deps:
             add(osv_eco, dep_name, version or "", rel, basis)
     return packages, stats
@@ -356,9 +374,57 @@ def lookup(
         for vid in ids:
             matched[vid].append(key)
     details, detail_issues = client.get_vulns(matched)
+    # Some databases (Go's, PyPA's) publish no severity; their GHSA or CVE
+    # alias usually does. Borrow the highest alias score, as osv-scanner's
+    # grouping did, and only fetch the aliases that are needed. Many CVE
+    # ids have no OSV record (404): that only leaves the advisory unscored.
+    needed = {
+        alias
+        for vid, vuln in details.items()
+        if _severity_of(vuln) is None
+        for alias in vuln.get("aliases") or []
+        if alias.startswith(("GHSA-", "CVE-")) and alias not in details
+    }
+    alias_details, alias_issues = client.get_vulns(needed) if needed else ({}, Counter())
+    known = {**alias_details, **details}
+
+    def severity(vid: str, vuln: dict) -> tuple[str | None, str]:
+        """(value, basis). Malicious packages carry no CVSS: they are critical."""
+        if vid.startswith("MAL-"):
+            return "CRITICAL", "malicious-package"
+        own = max_score(vuln)
+        if own is not None:
+            return f"{own:.1f}", "cvss-v3"
+        borrowed = [
+            s
+            for a in vuln.get("aliases") or []
+            if a in known
+            for s in [max_score(known[a])]
+            if s is not None
+        ]
+        if borrowed:
+            return f"{max(borrowed):.1f}", "alias-cvss-v3"
+        word = (vuln.get("database_specific") or {}).get("severity")
+        if word:
+            return str(word), "declared"
+        alias_words = [
+            str((known[a].get("database_specific") or {}).get("severity"))
+            for a in vuln.get("aliases") or []
+            if a in known and (known[a].get("database_specific") or {}).get("severity")
+        ]
+        if alias_words:
+            return alias_words[0], "alias-declared"
+        # no score, vector or severity anywhere: banded medium by the
+        # harness rule (dependency-watch), and labelled so it is never
+        # mistaken for a scored medium
+        return None, "unscored"
+
     candidates = []
     for vid in sorted(matched):
         vuln = details.get(vid) or {}
+        sev, basis = severity(vid, vuln) if vuln else (None, "details-missing")
+        if vid.startswith("MAL-"):
+            sev, basis = "CRITICAL", "malicious-package"
         for eco, name, version in matched[vid]:
             entry = packages[(eco, name, version)]
             candidates.append(
@@ -370,7 +436,8 @@ def lookup(
                     "package": name,
                     "found_version": version,
                     "fixed_version": fixed_version(vuln, name, eco) if vuln else None,
-                    "max_severity": _severity_of(vuln) if vuln else None,
+                    "max_severity": sev,
+                    "severity_basis": basis,
                     "evidence": "dependency_declared",
                     "version_basis": entry["version_basis"],
                     "sources": list(entry["sources"]),
@@ -378,6 +445,8 @@ def lookup(
                 }
             )
     candidates.sort(key=lambda c: (c["ecosystem"], c["package"], c["osv_id"]))
+    # a missing alias only costs a severity, never an advisory, so it is
+    # reported but does not degrade the scan's coverage
     issues = Counter(outcome.issues) + Counter(detail_issues)
     provenance = {
         "source": "osv-api",
@@ -387,6 +456,7 @@ def lookup(
         "packages_by_ecosystem": dict(sorted(Counter(k[0] for k in keys).items())),
         "packages_unanswered": unanswered,
         "advisory_details_missing": sum(detail_issues.values()),
+        "alias_records_unavailable": sum(alias_issues.values()),
         "lookup_issues": dict(sorted(issues.items())),
         "status": "degraded" if issues else "complete",
     }
@@ -401,6 +471,8 @@ def scan_api(repo: Path, client: OsvClient | None = None) -> dict:
     packages, stats = collect_packages(repo)
     candidates, provenance = lookup(packages, client or OsvClient())
     provenance.update(
+        transitive_coverage="partial" if stats["unresolved_manifests"] else "complete",
+        unresolved_manifests=stats["unresolved_manifests"],
         manifests_read=stats["manifests"],
         manifests_unparsed=stats["unparsed"],
         declarations_without_exact_version=stats["unpinned_skipped"],

@@ -2,6 +2,45 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.33.0]
+
+- **The osv adapter queries the OSV API; no scanner binary or local
+  database is needed** (owner decision 2026-10-20). `adapters/osv.py` reads
+  the checkout's lockfiles and manifests with the portfolio parsers (plus
+  `go.mod`, with the Go stdlib version from `toolchain`/`go`), then looks
+  every package up through the new shared client.
+  - **`traust_engine.osv`** is the one OSV client for every caller:
+    `querybatch` with page tokens followed, `vulns/{id}` details, retries
+    with backoff. **A failed lookup is never an empty result**: unanswered
+    queries are `None` and counted as `unreachable`, `quota-deferred` or
+    `error`.
+  - **Lookup provenance** comes with every scan: source, query time,
+    packages per ecosystem, unanswered packages, missing details, and
+    `status` (`complete` or `degraded`).
+  - **`transitive_coverage`** is `partial` when a manifest has no lockfile
+    beside it, and `unresolved_manifests` lists those files. Their direct
+    declarations are queried at the declared floor (`version_basis:
+    manifest-floor`); the transitive tree is not resolved. Owner decision
+    (c): report this as a coverage gap now; deps.dev resolution may follow.
+  - **Severity:** `max_severity` is a CVSS v3 base score computed from the
+    record's vector (new `osv.cvss` calculator), or one borrowed from a GHSA
+    or CVE alias, or the record's declared word. `severity_basis` says which.
+    `MAL-` malicious-package advisories are critical. An advisory with no
+    score anywhere is `unscored`, banded medium by the harness rule and
+    labelled so it is never mistaken for a scored medium.
+  - The osv-scanner functions (`run_scanner`, `parse_output`) stay only for
+    the parity check and are removed in a follow-up.
+- **Parser fixes** (they also affect the portfolio graph):
+  - `requirements.txt` lines with extras (`aiohttp[speedups]==3.14.1`) were
+    dropped.
+  - Requirements files are recognised by any name containing
+    `requirements` (`dev-requirements.txt`, `py3.10-ci-requirements.txt`),
+    not only `requirements*.txt`.
+  - New `yarn.lock` (classic and Berry) and `uv.lock` parsers. Workspace
+    members are the project itself and are skipped.
+- **Numeric CVSS scores are banded** (9.0+ critical, 7.0+ high, 4.0+ medium,
+  below 4.0 low). Before, every numeric score fell through to medium.
+
 ## [0.32.0]
 
 - **The migration command line moves out of the package.** The engine is a

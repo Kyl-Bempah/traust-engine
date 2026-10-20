@@ -154,3 +154,165 @@ def test_a_missing_advisory_detail_keeps_the_candidate():
 )
 def test_numeric_scores_are_banded(value, band):
     assert osv._cvss_to_severity(value) == band
+
+
+def test_severity_is_borrowed_from_a_ghsa_alias():
+    go_vuln = {
+        "id": "GO-2026-1",
+        "aliases": ["GHSA-abcd"],
+        "affected": [{"package": {"name": "github.com/x/y", "ecosystem": "Go"}}],
+    }
+    ghsa = {
+        "id": "GHSA-abcd",
+        "database_specific": {"severity": "HIGH"},
+        "severity": VULN["severity"],
+    }
+    pkgs = {("Go", "github.com/x/y", "1.0.0"): {"sources": ["go.mod"], "version_basis": "locked"}}
+    fake = FakeClient(
+        {Query("Go", "github.com/x/y", "1.0.0"): ["GO-2026-1"]},
+        details={"GO-2026-1": go_vuln, "GHSA-abcd": ghsa},
+    )
+    candidates, prov = osv.lookup(pkgs, fake)
+    assert candidates[0]["max_severity"] == "9.8"
+    assert prov["status"] == "complete"
+
+
+YARN_V1 = """# yarn lockfile v1
+
+
+"@algolia/autocomplete-core@1.5.2", "@algolia/autocomplete-core@^1.5.0":
+  version "1.5.2"
+  dependencies:
+    "@algolia/autocomplete-shared" "1.5.2"
+
+lodash@^4.17.0:
+  version "4.17.15"
+"""
+
+YARN_BERRY = """__metadata:
+  version: 8
+
+"@aashutoshrathi/word-wrap@npm:^1.2.3":
+  version: 1.2.6
+  resolution: "@aashutoshrathi/word-wrap@npm:1.2.6"
+
+"my-app@workspace:.":
+  version: 0.0.0-use.local
+
+"string-width-cjs@npm:string-width@^4.2.0":
+  version: 4.2.3
+
+"@material-ui/pickers@patch:@material-ui/pickers@npm%3A3.3.11#./x.patch::locator=root":
+  version: 3.3.11
+"""
+
+
+def test_yarn_classic():
+    _, deps = parsers.parse_yarn_lock(YARN_V1)
+    assert deps == [("@algolia/autocomplete-core", "1.5.2", True), ("lodash", "4.17.15", True)]
+
+
+def test_yarn_berry_skips_workspaces_and_resolves_aliases():
+    _, deps = parsers.parse_yarn_lock(YARN_BERRY)
+    assert ("@aashutoshrathi/word-wrap", "1.2.6", True) in deps
+    assert ("string-width", "4.2.3", True) in deps  # alias resolved to the real package
+    assert (
+        "@material-ui/pickers",
+        "3.3.11",
+        True,
+    ) in deps  # a patched package is still that package
+    assert not any(
+        name == "my-app" for name, _, _ in deps
+    )  # the workspace itself is not a dependency
+
+
+def test_yarn_lock_is_a_lockfile(tmp_path):
+    write(tmp_path, "yarn.lock", YARN_V1)
+    write(tmp_path, "package.json", '{"dependencies":{"lodash":"^4.0.0"}}')
+    packages, stats = osv.collect_packages(tmp_path)
+    assert packages[("npm", "lodash", "4.17.15")]["version_basis"] == "locked"
+    assert ("npm", "lodash", "4.0.0") not in packages
+    assert stats["superseded_by_lockfile"] == 1
+
+
+def test_uv_lock_skips_workspace_members():
+    text = """version = 1
+
+[[package]]
+name = "absl-py"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "MLflow"
+version = "3.0.0.dev0"
+source = { editable = "." }
+
+[[package]]
+name = "Some_Pkg"
+version = "1.2.3"
+source = { git = "https://github.com/x/y?rev=abc" }
+"""
+    _, deps = parsers.parse_uv_lock(text)
+    assert deps == [("absl-py", "2.4.0", True), ("some-pkg", "1.2.3", True)]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "dev-requirements.txt",
+        "py3.10-ci-requirements.txt",
+    ],
+)
+def test_requirements_files_are_found_by_any_name(name):
+    assert parsers.parser_for(f"sdk/{name}")[0] == "pypi"
+
+
+def test_severity_basis_is_recorded():
+    fake = FakeClient(
+        {Query("PyPI", "requests", "2.19.0"): ["GHSA-x84v"]}, details={"GHSA-x84v": VULN}
+    )
+    (c,), _ = osv.lookup(PKGS, fake)
+    assert c["severity_basis"] == "cvss-v3"
+
+
+def test_an_unscored_advisory_is_labelled_not_guessed():
+    bare = {"id": "PYSEC-1", "affected": [{"package": {"name": "requests", "ecosystem": "PyPI"}}]}
+    fake = FakeClient({Query("PyPI", "requests", "2.19.0"): ["PYSEC-1"]}, details={"PYSEC-1": bare})
+    (c,), _ = osv.lookup(PKGS, fake)
+    assert c["max_severity"] is None
+    assert c["severity_basis"] == "unscored"
+    assert osv._cvss_to_severity(c["max_severity"]) == "medium"  # the harness rule, labelled
+
+
+def test_a_malicious_package_is_critical():
+    mal = {"id": "MAL-2025-1", "affected": [{"package": {"name": "lodash", "ecosystem": "npm"}}]}
+    fake = FakeClient(
+        {Query("npm", "lodash", "4.17.15"): ["MAL-2025-1"]}, details={"MAL-2025-1": mal}
+    )
+    (c,), _ = osv.lookup(PKGS, fake)
+    assert c["severity_basis"] == "malicious-package"
+    assert osv._cvss_to_severity(c["max_severity"]) == "critical"
+
+
+def test_manifests_without_a_lockfile_are_a_coverage_gap(repo):
+    _, stats = osv.collect_packages(repo)
+    unresolved = {m["path"] for m in stats["unresolved_manifests"]}
+    assert "tools/requirements.txt" in unresolved  # a range, no lockfile
+    assert "java/pom.xml" in unresolved
+    assert "requirements.txt" not in unresolved  # fully pinned
+    assert "web/package.json" not in unresolved  # superseded by its lockfile
+
+
+def test_scan_reports_transitive_coverage(repo):
+    class Empty(FakeClient):
+        def __init__(self):
+            super().__init__({})
+
+    doc = osv.scan_api(repo, Empty())
+    prov = doc["provenance"]
+    assert prov["transitive_coverage"] == "partial"
+    assert prov["status"] == "complete"  # lookups all answered; coverage is reported separately
+    assert any(m["path"] == "java/pom.xml" for m in prov["unresolved_manifests"])
