@@ -258,6 +258,7 @@ def parse_pnpm_lock(text: str) -> Parsed:
 # ------------------------------------------------------------------- PyPI
 _REQ_LINE_RE = re.compile(
     r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*"
+    r"(?:\[[^\]]*\])?\s*"  # optional extras: name[extra1,extra2]==ver
     r"(?:===|==|>=|<=|~=|!=|<|>)\s*([^\s;,]+)"
 )
 
