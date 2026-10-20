@@ -101,7 +101,7 @@ class ToolchainOps(ContextOps):
         return POPULATABLE_TOOLS
 
     def db_cache_dirs(self) -> dict[str, Path]:
-        """Native vuln-DB cache roots keyed by tool name (grype, osv-scanner)."""
-        from traust_engine.toolchain._parsers import _GRYPE_DB_DIR, _OSV_CACHE_DIR
+        """Native vuln-DB cache roots keyed by tool name (grype)."""
+        from traust_engine.toolchain._parsers import _GRYPE_DB_DIR
 
-        return {"grype": _GRYPE_DB_DIR, "osv-scanner": _OSV_CACHE_DIR}
+        return {"grype": _GRYPE_DB_DIR}
