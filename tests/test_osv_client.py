@@ -123,3 +123,10 @@ def test_get_vulns_counts_failures():
 )
 def test_cvss_v3_base_score(vector, score):
     assert base_score(vector) == score
+
+
+def test_probe_reports_why_the_api_cannot_be_used():
+    assert client({"query": {}}).probe(Q1) is None
+    status, detail = client({"query": urllib.error.URLError("down")}).probe(Q1)
+    assert status == "unreachable" and "osv.test" in detail
+    assert client({"query": 429}).probe(Q1)[0] == "quota-deferred"

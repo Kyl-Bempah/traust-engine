@@ -14,7 +14,8 @@ the same vocabulary the continuous-ops comparison statuses use:
 - ``error``: any other HTTP error, or a response that isn't the expected JSON
 
 A caller reports any non-zero count as degraded coverage, never as
-"no advisories".
+"no advisories". ``probe`` lets a caller find out up front that the API
+cannot be used at all, and fail fast instead of retrying every batch.
 """
 
 from __future__ import annotations
@@ -133,6 +134,14 @@ class OsvClient:
         raise last
 
     # -- queries -----------------------------------------------------------
+
+    def probe(self, query: Query) -> tuple[str, str] | None:
+        """One lookup before a scan: ``None`` if the API answers, else (status, detail)."""
+        try:
+            self._request(f"{self.base_url}/query", query.body())
+        except _Failure as f:
+            return f.status, str(f)
+        return None
 
     def _follow_pages(self, query: Query, token: str) -> list[str]:
         ids: list[str] = []

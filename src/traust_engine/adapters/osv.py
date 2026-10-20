@@ -17,12 +17,17 @@ unused, dev-only, or the vulnerable code path unexercised.
 **Coverage is reported, never assumed.** A lookup that fails, is
 rate-limited or comes back partial is counted in the provenance block
 (``unreachable`` / ``quota-deferred`` / ``error``) and the scan is
-``degraded``. A degraded scan's missing answers are never "no advisories".
-Versions taken from a manifest rather than a lockfile are declared floors,
-tagged ``version_basis: manifest-floor``.
+``degraded``. When the API cannot be used at all (one probe before the scan,
+or not a single package answered) the scan is ``failed``: no dependency
+results, and ``scan()`` raises. Neither is ever "no advisories". Versions
+taken from a manifest rather than a lockfile are declared floors, tagged
+``version_basis: manifest-floor``.
 
-The osv-scanner binary path (``run_scanner`` / ``parse_output``) remains only
-for the parity check against this adapter, and is removed after it.
+The OSV API is the default. The osv-scanner binary path (``run_scanner`` /
+``parse_output``) serves air-gapped deployments, which run osv-scanner
+offline against a local OSV database the adopter provides; the harness does
+not install either (owner decision 2026-10-20). The engine reads no
+configuration: the caller chooses the path.
 """
 
 import os
@@ -252,6 +257,15 @@ def _requirements_all_pinned(text: str) -> bool:
     return bool(lines) and all("==" in ln for ln in lines)
 
 
+# A requirements file that pins every line can still list only the direct
+# dependencies (``feast[minimal]==0.62.0`` pulls in dozens more). Only a
+# compiled file (pip-compile, uv pip compile: ``# via`` annotations or
+# ``--hash=`` lines) is known to carry the whole tree.
+_COMPILED_REQUIREMENTS = re.compile(
+    r"^\s*#\s+via\b|--hash=|^#.*\b(?:pip-compile|uv pip compile)\b", re.M
+)
+
+
 def discover_manifests(repo: Path) -> list[tuple[str, str, Any]]:
     """(repo-relative path, ecosystem, parser) for every manifest in the tree.
 
@@ -337,11 +351,13 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
         except Exception:  # a malformed file is reported, never fatal
             stats["unparsed"].append(rel)
             continue
-        pinned_requirements = "requirements" in name.lower() and _requirements_all_pinned(text)
+        requirements = "requirements" in name.lower()
+        pinned_requirements = requirements and _requirements_all_pinned(text)
         # a workflow's action refs are exactly what runs: nothing to resolve
         exact = name in LOCKFILES or pinned_requirements or eco == "actions"
         basis = "locked" if exact else "manifest-floor"
-        if not exact:
+        whole_tree = exact and not (pinned_requirements and not _COMPILED_REQUIREMENTS.search(text))
+        if not whole_tree:
             stats["unresolved_manifests"].append(
                 {"path": rel, "ecosystem": osv_eco, "declarations": len(deps)}
             )
@@ -460,7 +476,26 @@ def lookup(
         "lookup_issues": dict(sorted(issues.items())),
         "status": "degraded" if issues else "complete",
     }
+    if keys and unanswered == len(keys):
+        provenance["status"] = "failed"
     return candidates, provenance
+
+
+def _failed_lookup(keys: list, client: OsvClient, status: str, detail: str) -> dict:
+    """Provenance for a scan that never reached the API: every package unanswered."""
+    return {
+        "source": "osv-api",
+        "base_url": client.base_url,
+        "queried_at": utc_now(),
+        "packages_queried": len(keys),
+        "packages_by_ecosystem": dict(sorted(Counter(k[0] for k in keys).items())),
+        "packages_unanswered": len(keys),
+        "advisory_details_missing": 0,
+        "alias_records_unavailable": 0,
+        "lookup_issues": {status: len(keys)},
+        "status": "failed",
+        "failure": {"status": status, "detail": detail},
+    }
 
 
 def scan_api(repo: Path, client: OsvClient | None = None) -> dict:
@@ -469,7 +504,13 @@ def scan_api(repo: Path, client: OsvClient | None = None) -> dict:
     if not repo.is_dir():
         raise ValueError(f"not a directory: {repo}")
     packages, stats = collect_packages(repo)
-    candidates, provenance = lookup(packages, client or OsvClient())
+    client = client or OsvClient()
+    keys = sorted(packages)
+    failure = client.probe(Query(*keys[0])) if keys else None
+    if failure:
+        candidates, provenance = [], _failed_lookup(keys, client, *failure)
+    else:
+        candidates, provenance = lookup(packages, client)
     provenance.update(
         transitive_coverage="partial" if stats["unresolved_manifests"] else "complete",
         unresolved_manifests=stats["unresolved_manifests"],
@@ -484,8 +525,15 @@ def scan_api(repo: Path, client: OsvClient | None = None) -> dict:
 
 
 def scan(repo: Path, timeout: int = 600, *, client: OsvClient | None = None) -> AdapterResult:
-    """Look up the checkout's declared packages through the OSV API."""
+    """Look up the checkout's declared packages through the OSV API.
+
+    Raises ``RuntimeError`` when the API could not be used at all.
+    """
     doc = scan_api(repo, client or OsvClient(timeout=timeout))
+    prov = doc["provenance"]
+    if prov["status"] == "failed":
+        detail = (prov.get("failure") or {}).get("detail") or "no package was answered"
+        raise RuntimeError(f"OSV API unavailable at {prov['base_url']}: {detail}")
     return build_scan_result(
         str(Path(repo).resolve()),
         "osv-api",

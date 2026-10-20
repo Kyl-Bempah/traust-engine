@@ -16,9 +16,17 @@ All notable changes to traust-engine are documented here.
     `error`.
   - **Lookup provenance** comes with every scan: source, query time,
     packages per ecosystem, unanswered packages, missing details, and
-    `status` (`complete` or `degraded`).
+    `status`: `complete`, `degraded` (some lookups failed), or `failed`.
+  - **An unusable API fails fast.** One probe lookup runs before the scan;
+    if it fails, or if no package at all is answered, the status is
+    `failed` with a `failure` block (`status`, `detail`), no candidates,
+    and `scan()` raises `RuntimeError`. Before, an outage retried every
+    batch and read as a degraded scan.
   - **`transitive_coverage`** is `partial` when a manifest has no lockfile
-    beside it, and `unresolved_manifests` lists those files. Their direct
+    beside it, and `unresolved_manifests` lists those files. A requirements
+    file that pins every line counts too unless it was compiled
+    (`pip-compile` / `uv pip compile`: `# via` or `--hash=` lines), since
+    pinned direct dependencies say nothing about the rest of the tree. Their direct
     declarations are queried at the declared floor (`version_basis:
     manifest-floor`); the transitive tree is not resolved. Owner decision
     (c): report this as a coverage gap now; deps.dev resolution may follow.
@@ -28,8 +36,10 @@ All notable changes to traust-engine are documented here.
     `MAL-` malicious-package advisories are critical. An advisory with no
     score anywhere is `unscored`, banded medium by the harness rule and
     labelled so it is never mistaken for a scored medium.
-  - The osv-scanner functions (`run_scanner`, `parse_output`) stay only for
-    the parity check and are removed in a follow-up.
+  - The osv-scanner functions (`run_scanner`, `parse_output`) stay for
+    **air-gapped deployments**, which run osv-scanner offline against a
+    local OSV database the adopter provides. The API is the default; the
+    harness installs neither the binary nor the database.
 - **Parser fixes** (they also affect the portfolio graph):
   - `requirements.txt` lines with extras (`aiohttp[speedups]==3.14.1`) were
     dropped.
