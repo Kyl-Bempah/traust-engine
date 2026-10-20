@@ -2,6 +2,18 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.34.0]
+
+- **The harness no longer fetches or tracks osv-scanner's offline
+  database** (scanner-currency step 6, owner decision 2026-10-20). OSV is
+  queried through its API; an air-gapped deployment provides osv-scanner and
+  its database itself.
+  - `toolchain._fetch_dbs` populates grype only; `db_status("osv-scanner")`
+    is `None` (no tracked database), and `db_cache_dirs()` no longer
+    includes an osv-scanner cache, so offline bundles carry grype's only.
+  - Kept for air-gapped runs: `adapters.osv.run_scanner` / `parse_output`
+    and the `--offline` freeze flag.
+
 ## [0.33.0]
 
 - **The osv adapter queries the OSV API; no scanner binary or local
