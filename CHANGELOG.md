@@ -2,6 +2,43 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.36.0]
+
+- **Manifests without a lockfile are resolved through deps.dev** (owner
+  decisions 2026-10-20 option c and 2026-10-21: on by default, opt-out by
+  configuration).
+  - **New `traust_engine.depsdev` client** for
+    `GET /v3/systems/{system}/packages/{name}/versions/{version}:dependencies`
+    (npm, PyPI, Maven, Cargo) and the package's default version.
+    - It follows the OSV client's failure rule: `ok`, `not-found` (404),
+      or `unreachable` / `quota-deferred` / `error`, and never an empty
+      graph on failure.
+    - Low concurrency and an optional on-disk cache (24 h; failures are
+      never cached).
+    - `ATTRIBUTION` carries the CC BY 4.0 notice for deps.dev-generated
+      data. API use is subject to the Google APIs Terms of Service.
+  - **`adapters.osv.resolve_transitive`**, used by
+    `scan_api(..., resolver=)`:
+    - every direct declaration of an unresolved manifest is resolved on
+      its own;
+    - the packages in its graph join the OSV lookup with
+      `version_basis: resolved` and `resolved_via`;
+    - a declaration with no version resolves at deps.dev's default version
+      (`version_basis: resolved-default`), what an install gets today.
+  - **A declared name overrides resolved versions where only one version
+    installs.** For PyPI the rule applies per requirements file, since
+    each file is its own environment. For Maven it is repo-wide, since
+    parent poms manage versions for every module. npm and Cargo keep every
+    version.
+  - **Coverage:** a manifest moves to `resolved_manifests` only when every
+    declaration resolved. Otherwise it stays in `unresolved_manifests`
+    with a `reason`.
+  - **Provenance:** a `resolution` block with source, time, counts,
+    issues, cache hits, license and attribution.
+- **Fixed: requirement lines with no version** (`requests`,
+  `flask[async]`) were dropped by the shared parser and never counted.
+  Coverage was overstated. They now count as declarations, and deps.dev
+  resolves them.
 
 ## [0.35.1]
 

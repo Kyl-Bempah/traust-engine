@@ -257,6 +257,22 @@ def _requirements_all_pinned(text: str) -> bool:
     return bool(lines) and all("==" in ln for ln in lines)
 
 
+# A bare requirement (``requests``, ``flask[async]``) carries no version. The
+# shared parser drops those lines, so they are counted here: they are
+# declarations the lookup cannot check, never silently absent.
+_BARE_REQUIREMENT = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?$")
+
+
+def _bare_requirements(text: str) -> list[str]:
+    names = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].split(";", 1)[0].strip()
+        m = _BARE_REQUIREMENT.match(line) if line and not line.startswith("-") else None
+        if m:
+            names.append(re.sub(r"[-_.]+", "-", m.group(1)).lower())
+    return names
+
+
 # A requirements file that pins every line can still list only the direct
 # dependencies (``feast[minimal]==0.62.0`` pulls in dozens more). Only a
 # compiled file (pip-compile, uv pip compile: ``# via`` annotations or
@@ -305,17 +321,22 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
         "unpinned_skipped": 0,
         "superseded_by_lockfile": 0,
         # manifests with no lockfile beside them: their direct declarations
-        # are queried at the declared floor, but the transitive tree is not
-        # resolved (owner decision 2026-10-20, option c: reported as a
-        # coverage gap now; resolution through deps.dev may follow)
+        # are queried at the declared floor, and the transitive tree is
+        # either resolved through deps.dev (resolve_transitive) or reported
+        # as a coverage gap (owner decisions 2026-10-20 option c, 2026-10-21)
         "unresolved_manifests": [],
+        # per unresolved manifest: the direct declarations that were added
+        # (eco, name, version), and the declared names that carry no
+        # version, for resolve_transitive
+        "unresolved_direct": {},
+        "unversioned_direct": {},
     }
 
-    def add(eco: str, name: str, version: str, src: str, basis: str) -> None:
+    def add(eco: str, name: str, version: str, src: str, basis: str):
         version = version.strip()
         if not name or not version or not _EXACT_VERSION.match(version) or "${" in version:
             stats["unpinned_skipped"] += 1
-            return
+            return None
         if eco == "Go":
             version = version.removeprefix("v")
         entry = packages.setdefault((eco, name, version), {"sources": [], "version_basis": basis})
@@ -323,6 +344,9 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
             entry["sources"].append(src)
         if basis == "locked":  # a lockfile anywhere outranks a manifest floor
             entry["version_basis"] = "locked"
+        elif entry["version_basis"] == "resolved":
+            entry["version_basis"] = basis  # declared outranks resolved
+        return (eco, name, version)
 
     for rel, eco, parser in manifests:
         name = Path(rel).name
@@ -357,13 +381,154 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
         exact = name in LOCKFILES or pinned_requirements or eco == "actions"
         basis = "locked" if exact else "manifest-floor"
         whole_tree = exact and not (pinned_requirements and not _COMPILED_REQUIREMENTS.search(text))
+        added = [
+            add(osv_eco, dep_name, version or "", rel, basis) for dep_name, version, _i in deps
+        ]
+        bare = _bare_requirements(text) if requirements else []
+        stats["unpinned_skipped"] += len(bare)
         if not whole_tree:
             stats["unresolved_manifests"].append(
-                {"path": rel, "ecosystem": osv_eco, "declarations": len(deps)}
+                {"path": rel, "ecosystem": osv_eco, "declarations": len(deps) + len(bare)}
             )
-        for dep_name, version, _indirect in deps:
-            add(osv_eco, dep_name, version or "", rel, basis)
+            stats["unresolved_direct"][rel] = [k for k in added if k]
+            stats["unversioned_direct"][rel] = [
+                (osv_eco, n) for (n, _v, _i), k in zip(deps, added, strict=True) if k is None and n
+            ] + [(osv_eco, n) for n in bare]
     return packages, stats
+
+
+def resolve_transitive(packages: dict[tuple[str, str, str], dict], stats: dict, resolver) -> dict:
+    """Add the transitive tree of every unresolved manifest through deps.dev.
+
+    Each direct declaration of a manifest without a lockfile is resolved on
+    its own; the graph's packages join the lookup with ``version_basis:
+    resolved`` and ``resolved_via`` (the direct dependencies that brought
+    them in). A manifest moves to ``resolved_manifests`` only when every
+    declaration resolved; otherwise it stays unresolved with the reason.
+    Returns the ``resolution`` provenance block.
+    """
+    from traust_engine.depsdev import ATTRIBUTION, LICENSE, SYSTEMS
+
+    direct: dict[str, list] = stats.get("unresolved_direct") or {}
+    unversioned: dict[str, list] = stats.get("unversioned_direct") or {}
+    # A declared name overrides a resolved version of it where only one
+    # version can be installed. pip installs one per environment, and each
+    # requirements file is its own environment, so the rule is per file.
+    # Maven takes the version the project declares or manages, and parent
+    # poms manage it for every module, so the rule is repo-wide. npm and
+    # Cargo may install several versions side by side: no rule.
+    maven_declared = {n.lower() for (e, n, _v), ent in packages.items() if e == "Maven"}
+    pypi_declared: dict[str, set[str]] = {}
+    for (e, n, _v), ent in packages.items():
+        if e == "PyPI":
+            for src in ent["sources"]:
+                pypi_declared.setdefault(src, set()).add(re.sub(r"[-_.]+", "-", n).lower())
+    block: dict[str, Any] = {
+        "source": "deps.dev",
+        "base_url": resolver.base_url,
+        "resolved_at": utc_now(),
+        "license": LICENSE,
+        "attribution": ATTRIBUTION,
+    }
+    wanted = sorted({k for keys in direct.values() for k in keys if k[0] in SYSTEMS})
+    bare = sorted({k for names in unversioned.values() for k in names if k[0] in SYSTEMS})
+    probe_key = wanted[0] if wanted else ((*bare[0], "0") if bare else None)
+    failure = resolver.probe(probe_key) if probe_key else None
+    defaults: dict = {}
+    if failure:
+        results, counts = {}, Counter({failure[0]: len(wanted) + len(bare)})
+        block.update(status="failed", failure={"status": failure[0], "detail": failure[1]})
+    else:
+        # a declaration with no version: what an install gets today
+        defaults = resolver.defaults_many(bare) if bare else {}
+        for (eco, name), res in defaults.items():
+            if not res.ok:
+                continue
+            version = res.nodes[0][1]
+            entry = packages.setdefault(
+                (eco, name, version), {"sources": [], "version_basis": "resolved-default"}
+            )
+            for m, names in unversioned.items():
+                if (eco, name) in names and m not in entry["sources"]:
+                    entry["sources"].append(m)
+        todo = sorted(
+            set(wanted) | {(e, n, r.nodes[0][1]) for (e, n), r in defaults.items() if r.ok}
+        )
+        results, counts = resolver.resolve_many(todo)
+    block["direct_dependencies"] = len(wanted) + len(bare)
+    block["defaulted"] = sum(1 for r in defaults.values() if r.ok)
+    added = 0
+    for key, res in results.items():
+        if not res.ok:
+            continue
+        via = f"{key[1]}@{key[2]}"
+        srcs = [m for m, keys in direct.items() if key in keys]
+        d = defaults.get((key[0], key[1]))
+        if d is not None and d.ok and d.nodes[0][1] == key[2]:  # resolved at the default
+            srcs += [
+                m for m, names in unversioned.items() if (key[0], key[1]) in names and m not in srcs
+            ]
+        for name, version, _relation in res.nodes:
+            node_srcs = srcs
+            if key[0] == "Maven" and name.lower() in maven_declared:
+                node_srcs = []
+            elif key[0] == "PyPI":
+                norm = re.sub(r"[-_.]+", "-", name).lower()
+                node_srcs = [m for m in srcs if norm not in pypi_declared.get(m, set())]
+            if not node_srcs:
+                block["overridden_by_declaration"] = block.get("overridden_by_declaration", 0) + 1
+                continue
+            entry = packages.get((key[0], name, version))
+            if entry is None:
+                entry = packages[(key[0], name, version)] = {
+                    "sources": [],
+                    "version_basis": "resolved",
+                    "resolved_via": [],
+                }
+                added += 1
+            if entry["version_basis"] != "resolved":
+                continue  # declared or locked: the declaration already covers it
+            for src in node_srcs:
+                if src not in entry["sources"]:
+                    entry["sources"].append(src)
+            if via not in entry["resolved_via"]:
+                entry["resolved_via"].append(via)
+    still, resolved = [], []
+    for m in stats["unresolved_manifests"]:
+        keys = list(direct.get(m["path"]) or [])
+        reasons = Counter()
+        if m["ecosystem"] not in SYSTEMS:
+            reasons[f"{m['ecosystem']} not resolvable through deps.dev"] += 1
+        for eco, name in unversioned.get(m["path"]) or []:
+            d = defaults.get((eco, name))
+            if d is not None and d.ok:
+                keys.append((eco, name, d.nodes[0][1]))
+            else:
+                reasons[f"no version, deps.dev default {d.status if d else 'not resolved'}"] += 1
+        unaccounted = m["declarations"] - len(keys) - sum(reasons.values())
+        if unaccounted > 0:
+            reasons["declarations without an exact version or floor"] += unaccounted
+        for k in keys:
+            res = results.get(k)
+            st = res.status if res else (failure[0] if failure else "not resolved")
+            if st != "ok":
+                reasons[f"deps.dev {st}"] += 1
+        if reasons:
+            still.append({**m, "reason": dict(reasons)})
+        else:
+            resolved.append({**m, "via": "deps.dev"})
+    stats["unresolved_manifests"], stats["resolved_manifests"] = still, resolved
+    block.update(
+        resolved=counts.get("ok", 0),
+        not_found=counts.get("not-found", 0),
+        issues={k: v for k, v in sorted(counts.items()) if k not in ("ok", "not-found")},
+        cache_hits=sum(1 for r in results.values() if r.cached),
+        packages_added=added,
+        manifests_resolved=len(resolved),
+        manifests_still_unresolved=len(still),
+    )
+    block.setdefault("status", "degraded" if block["issues"] else "complete")
+    return block
 
 
 def _severity_of(vuln: dict) -> str | None:
@@ -459,6 +624,11 @@ def lookup(
                     "evidence": "dependency_declared",
                     "version_basis": entry["version_basis"],
                     "sources": list(entry["sources"]),
+                    **(
+                        {"resolved_via": list(entry["resolved_via"])}
+                        if entry.get("resolved_via")
+                        else {}
+                    ),
                     "details_fetched": bool(vuln),
                 }
             )
@@ -500,12 +670,17 @@ def _failed_lookup(keys: list, client: OsvClient, status: str, detail: str) -> d
     }
 
 
-def scan_api(repo: Path, client: OsvClient | None = None) -> dict:
-    """Collect packages and look them up. Returns the candidates document body."""
+def scan_api(repo: Path, client: OsvClient | None = None, resolver=None) -> dict:
+    """Collect packages and look them up. Returns the candidates document body.
+
+    With a ``resolver`` (``traust_engine.depsdev.DepsDevClient``), manifests
+    without a lockfile have their transitive tree resolved first.
+    """
     repo = repo.resolve()
     if not repo.is_dir():
         raise ValueError(f"not a directory: {repo}")
     packages, stats = collect_packages(repo)
+    resolution = resolve_transitive(packages, stats, resolver) if resolver else None
     client = client or OsvClient()
     keys = sorted(packages)
     failure = client.probe(Query(*keys[0])) if keys else None
@@ -516,11 +691,14 @@ def scan_api(repo: Path, client: OsvClient | None = None) -> dict:
     provenance.update(
         transitive_coverage="partial" if stats["unresolved_manifests"] else "complete",
         unresolved_manifests=stats["unresolved_manifests"],
+        resolved_manifests=stats.get("resolved_manifests") or [],
         manifests_read=stats["manifests"],
         manifests_unparsed=stats["unparsed"],
         declarations_without_exact_version=stats["unpinned_skipped"],
         manifests_superseded_by_lockfile=stats["superseded_by_lockfile"],
     )
+    if resolution is not None:
+        provenance["resolution"] = resolution
     if stats["unparsed"] and provenance["status"] == "complete":
         provenance["status"] = "degraded"
     return {"provenance": provenance, "candidates": candidates}
