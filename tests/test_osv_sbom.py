@@ -229,3 +229,128 @@ def test_grype_matches_on_os_installed_packages_are_listed_with_their_owner():
     assert row["package"] == "urllib3"
     assert row["installed_by"] == ["x"]  # the owning artifact's name
     assert row["paths"] == ["/usr/lib/python3.9/site-packages/urllib3"]
+
+
+def test_a_cyclonedx_dict_is_refused_like_a_file():
+    cdx = {"bomFormat": "CycloneDX", "specVersion": "1.5", "version": 1, "components": []}
+    with pytest.raises(m.SbomFormatError, match="file-ownership"):
+        m.scan_sbom(cdx)
+
+
+def test_an_app_copy_of_an_rpm_installed_package_keeps_its_own_matches():
+    # urllib3 1.26.5 twice: the RPM's copy under /usr, an app copy under /opt.
+    # The app copy is a real candidate; its grype match is not the RPM's.
+    syft = {
+        "source": {"name": "app", "metadata": {}},
+        "artifacts": [
+            art(
+                "r1",
+                "rpm",
+                "pkg:rpm/el/python3-urllib3@1.26.5",
+                "/var/lib/rpm",
+                name="python3-urllib3",
+            ),
+            art(
+                "u1",
+                "python",
+                "pkg:pypi/urllib3@1.26.5",
+                "/usr/lib/python3.9/site-packages/urllib3",
+            ),
+            art("u2", "python", "pkg:pypi/urllib3@1.26.5", "/opt/app-root/lib/urllib3"),
+        ],
+        "artifactRelationships": [
+            {"parent": "r1", "child": "u1", "type": "ownership-by-file-overlap"},
+        ],
+    }
+    packages, _ = m.collect_sbom_packages(syft)
+    assert ("PyPI", "urllib3", "1.26.5") in packages  # the app copy is sent to OSV
+    assert packages[("PyPI", "urllib3", "1.26.5")]["sources"] == ["/opt/app-root/lib/urllib3"]
+    grype = {
+        "matches": [
+            {
+                "artifact": {
+                    "type": "python",
+                    "purl": "pkg:pypi/urllib3@1.26.5",
+                    "locations": [{"path": "/opt/app-root/lib/urllib3"}],
+                },
+                "vulnerability": {"id": "GHSA-38jv", "severity": "High"},
+            },
+            {
+                "artifact": {
+                    "type": "python",
+                    "purl": "pkg:pypi/urllib3@1.26.5",
+                    "locations": [{"path": "/usr/lib/python3.9/site-packages/urllib3"}],
+                },
+                "vulnerability": {"id": "GHSA-38jv", "severity": "High"},
+            },
+        ]
+    }
+    (row,) = m.grype_os_installed_matches(grype, syft)
+    assert row["paths"] == ["/usr/lib/python3.9/site-packages/urllib3"]
+    assert row["installed_by"] == ["python3-urllib3"]
+
+
+def test_two_owned_copies_of_one_purl_keep_their_own_owners():
+    # tar 6.1.11 twice, installed by different RPMs: grype's artifact id says
+    # which copy a match is on, so installed_by is not the union of both
+    syft = {
+        "source": {"name": "app", "metadata": {}},
+        "artifacts": [
+            art("nodejs", "rpm", "pkg:rpm/el/nodejs@18", "/var/lib/rpm", name="nodejs"),
+            art("npmrpm", "rpm", "pkg:rpm/el/npm@9", "/var/lib/rpm", name="npm"),
+            art("t1", "npm", "pkg:npm/tar@6.1.11", "/usr/lib/node_modules/npm/node_modules/tar"),
+            art("t2", "npm", "pkg:npm/tar@6.1.11", "/usr/lib/node_modules/other/node_modules/tar"),
+        ],
+        "artifactRelationships": [
+            {"parent": "nodejs", "child": "t1", "type": "ownership-by-file-overlap"},
+            {"parent": "npmrpm", "child": "t2", "type": "ownership-by-file-overlap"},
+        ],
+    }
+    grype = {
+        "matches": [
+            {
+                "artifact": {
+                    "id": "t1",
+                    "type": "npm",
+                    "purl": "pkg:npm/tar@6.1.11",
+                    "locations": [{"path": "/usr/lib/node_modules/npm/node_modules/tar"}],
+                },
+                "vulnerability": {"id": "GHSA-6vf4", "severity": "High"},
+            },
+            {
+                "artifact": {
+                    "id": "t2",
+                    "type": "npm",
+                    "purl": "pkg:npm/tar@6.1.11",
+                    "locations": [{"path": "/usr/lib/node_modules/other/node_modules/tar"}],
+                },
+                "vulnerability": {"id": "GHSA-6vf4", "severity": "High"},
+            },
+        ]
+    }
+    rows = m.grype_os_installed_matches(grype, syft)
+    assert [(r["installed_by"], r["paths"]) for r in rows] == [
+        (["nodejs"], ["/usr/lib/node_modules/npm/node_modules/tar"]),
+        (["npm"], ["/usr/lib/node_modules/other/node_modules/tar"]),
+    ]
+
+
+def test_a_match_without_locations_is_attributed_by_its_artifact_id():
+    # the id names the copy even when the match carries no paths
+    grype = {
+        "matches": [
+            {
+                "artifact": {"id": "p1", "type": "python", "purl": "pkg:pypi/urllib3@1.26.5"},
+                "vulnerability": {"id": "GHSA-38jv", "severity": "High"},
+            },
+            {  # no id and no paths: cannot be told apart, keeps the purl attribution
+                "artifact": {"type": "python", "purl": "pkg:pypi/urllib3@1.26.5"},
+                "vulnerability": {"id": "GHSA-x84v", "severity": "Medium"},
+            },
+        ]
+    }
+    rows = m.grype_os_installed_matches(grype, SYFT)
+    assert [(r["package"], r["installed_by"], r["paths"]) for r in rows] == [
+        ("urllib3", ["x"], []),  # by id
+        ("urllib3", ["x"], []),  # no id, no paths: purl fallback
+    ]
