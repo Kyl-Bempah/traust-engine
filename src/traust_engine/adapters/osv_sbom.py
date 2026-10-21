@@ -90,14 +90,18 @@ def parse_purl(purl: str) -> tuple[str, str, str] | None:
     return eco, name, version
 
 
-def load_syft(path: Path) -> dict:
-    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+def _require_syft(doc: object, source: str) -> dict:
+    """Only syft JSON output qualifies: both arrays must be present."""
     if not isinstance(doc, dict) or "artifacts" not in doc or "artifactRelationships" not in doc:
         raise SbomFormatError(
-            f"{path} is not a syft JSON SBOM (syft -o syft-json): CycloneDX and SPDX "
+            f"{source} is not a syft JSON SBOM (syft -o syft-json): CycloneDX and SPDX "
             "drop the file-ownership relationships the scan needs"
         )
     return doc
+
+
+def load_syft(path: Path) -> dict:
+    return _require_syft(json.loads(Path(path).read_text(encoding="utf-8")), str(path))
 
 
 def collect_sbom_packages(doc: dict) -> tuple[dict[tuple[str, str, str], dict], dict]:
@@ -165,7 +169,11 @@ def _with_stats(provenance: dict, stats: dict, doc: dict) -> dict:
 
 def scan_sbom(sbom: Path | dict, client: OsvClient | None = None) -> dict:
     """Look an image's non-OS-installed language packages up through the OSV API."""
-    doc = sbom if isinstance(sbom, dict) else load_syft(sbom)
+    doc = (
+        _require_syft(sbom, "the dict passed to scan_sbom")
+        if isinstance(sbom, dict)
+        else load_syft(sbom)
+    )
     packages, stats = collect_sbom_packages(doc)
     client = client or OsvClient()
     keys = sorted(packages)
@@ -203,18 +211,49 @@ def mark_grype_duplicates(candidates: list[dict], grype_doc: dict) -> dict:
     return {"also_in_grype": dup, "osv_only": len(candidates) - dup}
 
 
-def os_installed_owners(doc: dict) -> dict[tuple[str, str, str], list[str]]:
-    """Language package (purl identity) -> the OS packages that installed it."""
+def _ownership(
+    doc: dict,
+) -> tuple[
+    # child artifact id -> (purl identity, owners, owned paths): grype carries
+    # syft's artifact ids, so a match's id names the exact copy
+    dict[str, tuple[tuple[str, str, str], set[str], set[str]]],
+    # purl identity -> (owners, owned paths), summed across same-purl copies:
+    # the fallback for a match that brings no usable id
+    dict[tuple[str, str, str], tuple[set[str], set[str]]],
+]:
+    """Ownership by artifact id, and by purl identity as the fallback.
+
+    The same name+version can be OS-installed more than once, by different OS
+    packages, and app-installed too; the artifact id (or, failing that, the
+    paths) says which copy is which.
+    """
     artifacts = {a.get("id"): a for a in doc.get("artifacts") or [] if isinstance(a, dict)}
-    owners: dict[tuple[str, str, str], set[str]] = {}
+    by_id: dict[str, tuple[tuple[str, str, str], set[str], set[str]]] = {}
+    by_purl: dict[tuple[str, str, str], tuple[set[str], set[str]]] = {}
     for r in doc.get("artifactRelationships") or []:
         parent = artifacts.get(r.get("parent")) or {}
         if r.get("type") != OWNERSHIP or parent.get("type") not in OS_PACKAGE_TYPES:
             continue
-        key = parse_purl((artifacts.get(r.get("child")) or {}).get("purl") or "")
-        if key:
-            owners.setdefault(key, set()).add(parent.get("name") or "")
-    return {k: sorted(v - {""}) for k, v in owners.items()}
+        child = artifacts.get(r.get("child")) or {}
+        key = parse_purl(child.get("purl") or "")
+        if not key:
+            continue
+        owner = parent.get("name") or ""
+        child_paths = {loc.get("path") for loc in child.get("locations") or [] if loc.get("path")}
+        cid = child.get("id") or ""
+        if cid:
+            _, id_owners, id_paths = by_id.setdefault(cid, (key, set(), set()))
+            id_owners.add(owner)
+            id_paths.update(child_paths)
+        purl_owners, purl_paths = by_purl.setdefault(key, (set(), set()))
+        purl_owners.add(owner)
+        purl_paths.update(child_paths)
+    return by_id, by_purl
+
+
+def os_installed_owners(doc: dict) -> dict[tuple[str, str, str], list[str]]:
+    """Language package (purl identity) -> the OS packages that installed it."""
+    return {key: sorted(owners - {""}) for key, (owners, _paths) in _ownership(doc)[1].items()}
 
 
 def grype_os_installed_matches(grype_doc: dict, doc: dict) -> list[dict]:
@@ -226,16 +265,33 @@ def grype_os_installed_matches(grype_doc: dict, doc: dict) -> list[dict]:
     ``nodejs``/``npm`` RPMs) were against RPM-installed packages. Their fixes
     arrive in the owning RPM, so the upstream advisory is not evidence on its
     own: the owner's own advisory state is.
+
+    A match is attributed through its artifact id — grype carries syft's ids,
+    which name the exact copy — so two OS packages that each installed the
+    same name+version are never conflated. Without a usable id the purl plus
+    the match's paths decide, and a match with neither id nor paths keeps the
+    purl attribution, since it cannot be told apart.
     """
-    owners = os_installed_owners(doc)
+    by_id, by_purl = _ownership(doc)
     out = []
     for m in grype_doc.get("matches") or []:
         art, vuln = m.get("artifact") or {}, m.get("vulnerability") or {}
         if art.get("type") in OS_PACKAGE_TYPES:
             continue
-        key = parse_purl(art.get("purl") or "")
-        if key not in owners:
-            continue
+        paths = [loc.get("path") for loc in art.get("locations") or [] if loc.get("path")]
+        hit = by_id.get(art.get("id") or "")
+        if hit is not None:
+            key, owners, _owned = hit
+        else:
+            key = parse_purl(art.get("purl") or "")
+            fallback = by_purl.get(key)
+            if fallback is None:
+                continue
+            owners, owned_paths = fallback
+            # the same name+version can be OS-installed and app-installed:
+            # only a match inside the owned paths is the OS package's copy
+            if owned_paths and paths and not set(paths) & owned_paths:
+                continue
         out.append(
             {
                 "id": vuln.get("id"),
@@ -243,8 +299,8 @@ def grype_os_installed_matches(grype_doc: dict, doc: dict) -> list[dict]:
                 "ecosystem": key[0],
                 "package": key[1],
                 "version": key[2],
-                "paths": [loc.get("path") for loc in art.get("locations") or [] if loc.get("path")],
-                "installed_by": owners[key],
+                "paths": paths,
+                "installed_by": sorted(owners - {""}),
             }
         )
     return sorted(out, key=lambda x: (x["package"], x["version"], x["id"] or ""))

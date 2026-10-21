@@ -2,6 +2,22 @@
 
 All notable changes to traust-engine are documented here.
 
+
+## [0.35.1]
+
+- **`adapters/osv_sbom.py` fixes from the 0.35.0 review:**
+  - `scan_sbom` now validates a dict input the same way `load_syft` validates
+    a file: a CycloneDX or SPDX document passed as a dict raises
+    `SbomFormatError` instead of silently returning a "complete" scan with
+    zero candidates.
+  - `grype_os_installed_matches` attributes a match through its artifact id —
+    grype carries syft's ids, which name the exact copy — so two OS packages
+    that each installed the same name+version are never conflated, and a
+    match without locations is still attributed. Without a usable id, the
+    purl plus the match's paths decide: an app-installed copy of an
+    RPM-installed name+version (under `/opt` vs `/usr`) is no longer labeled
+    `installed_by` the RPM.
+
 ## [0.35.0]
 
 - **Container images: language packages through OSV** (`adapters/osv_sbom.py`,
