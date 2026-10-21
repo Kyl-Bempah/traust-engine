@@ -304,6 +304,45 @@ def discover_manifests(repo: Path) -> list[tuple[str, str, Any]]:
     return found
 
 
+_GO_REPLACE = re.compile(
+    r"^(?P<old>\S+)(?:\s+(?P<oldv>v\S+))?\s*=>\s*(?P<new>\S+)(?:\s+(?P<newv>v\S+))?\s*$"
+)
+
+
+def gomod_replaces(text: str) -> dict[tuple[str, str | None], tuple[str, str | None]]:
+    """``replace`` directives: (old path, old version or None) -> (new, new version).
+
+    A new path starting ``./``, ``../`` or ``/`` is a local directory (version
+    None): the module is built from the checkout itself, so it is not a
+    published package to look up. The shared ``parse_gomod`` ignores
+    ``replace``, hence this reader.
+    """
+    out: dict[tuple[str, str | None], tuple[str, str | None]] = {}
+    in_block = False
+    for raw in text.splitlines():
+        line = raw.split("//", 1)[0].strip()
+        if line.startswith("replace ("):
+            in_block = True
+            continue
+        if in_block and line == ")":
+            in_block = False
+            continue
+        if in_block:
+            candidate = line
+        elif line.startswith("replace "):
+            candidate = line[len("replace ") :]
+        else:
+            continue
+        m = _GO_REPLACE.match(candidate)
+        if m:
+            out[(m.group("old"), m.group("oldv"))] = (m.group("new"), m.group("newv"))
+    return out
+
+
+def _is_local(path: str) -> bool:
+    return path.startswith(("./", "../", "/"))
+
+
 _POM_DEP = re.compile(r"<dependency>(.*?)</dependency>", re.S)
 
 
@@ -396,6 +435,10 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
         # resolved tree inherits its direct dependency's scope
         "direct_scope": {},
         "unversioned_scope": {},
+        # go.mod requires replaced with a directory in the checkout: the
+        # project's own modules, not published packages
+        "go_replaced_local": 0,
+        "go_replaced_module": 0,
     }
 
     def add(eco: str, name: str, version: str, src: str, basis: str, scope: str = "runtime"):
@@ -430,8 +473,18 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
         osv_eco = OSV_ECOSYSTEM[eco]
         try:
             if parser == "gomod":
-                _, deps = parse_gomod(text)
+                module, deps = parse_gomod(text)
+                replaces = gomod_replaces(text)
                 for path, version, _indirect in deps:
+                    if path == module:
+                        continue
+                    new = replaces.get((path, version)) or replaces.get((path, None))
+                    if new and (_is_local(new[0]) or not new[1]):
+                        stats["go_replaced_local"] += 1  # built from the checkout
+                        continue
+                    if new:  # another module is what gets built
+                        stats["go_replaced_module"] += 1
+                        path, version = new
                     add(osv_eco, path, version, rel, "locked")
                 m = _GO_TOOLCHAIN.search(text) or _GO_DIRECTIVE.search(text)
                 if m:
@@ -785,6 +838,8 @@ def scan_api(repo: Path, client: OsvClient | None = None, resolver=None) -> dict
         manifests_read=stats["manifests"],
         manifests_unparsed=stats["unparsed"],
         declarations_without_exact_version=stats["unpinned_skipped"],
+        go_requires_replaced_locally=stats.get("go_replaced_local", 0),
+        go_requires_replaced_by_module=stats.get("go_replaced_module", 0),
         manifests_superseded_by_lockfile=stats["superseded_by_lockfile"],
     )
     if resolution is not None:

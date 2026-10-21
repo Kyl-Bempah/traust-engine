@@ -383,3 +383,50 @@ def test_some_packages_answered_is_degraded():
 
     _, prov = osv.lookup(PKGS, Half({}))
     assert prov["status"] == "degraded"
+
+
+GOMOD_WITH_REPLACES = """module example.com/app/v3
+
+go 1.22
+
+require (
+	example.com/app/api/v3 v3.6.0-alpha.0
+	github.com/old/lib v1.2.0
+	github.com/pinned/only v1.0.0
+	github.com/pinned/only/other v1.1.0
+	golang.org/x/net v0.17.0
+)
+
+require example.com/app/v3 v3.6.0 // the module itself, via a tool
+
+replace (
+	example.com/app/api/v3 => ./api // built from the checkout
+	github.com/old/lib => github.com/fork/lib v1.2.5
+)
+
+replace github.com/pinned/only v1.0.0 => ../only
+replace github.com/pinned/only/other v9.9.9 => github.com/never/used v1.0.0
+"""
+
+
+def test_gomod_replaces():
+    r = osv.gomod_replaces(GOMOD_WITH_REPLACES)
+    assert r[("example.com/app/api/v3", None)] == ("./api", None)
+    assert r[("github.com/old/lib", None)] == ("github.com/fork/lib", "v1.2.5")
+    assert r[("github.com/pinned/only", "v1.0.0")] == ("../only", None)
+
+
+def test_go_requires_replaced_locally_are_not_looked_up(tmp_path):
+    write(tmp_path, "go.mod", GOMOD_WITH_REPLACES)
+    packages, stats = osv.collect_packages(tmp_path)
+    names = {(n, v) for e, n, v in packages if e == "Go"}
+    assert ("example.com/app/api/v3", "3.6.0-alpha.0") not in names  # ./api
+    assert ("github.com/pinned/only", "1.0.0") not in names  # ../only
+    assert ("example.com/app/v3", "3.6.0") not in names  # the module itself
+    assert ("github.com/fork/lib", "1.2.5") in names  # the replacement is what builds
+    assert ("github.com/old/lib", "1.2.0") not in names
+    # a version-specific replace for another version does not apply
+    assert ("github.com/pinned/only/other", "1.1.0") in names
+    assert ("golang.org/x/net", "0.17.0") in names
+    assert stats["go_replaced_local"] == 2
+    assert stats["go_replaced_module"] == 1
