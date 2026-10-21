@@ -441,6 +441,40 @@ class TestDirectoryValidation(unittest.TestCase):
             self.assertIn("top-level.json", names)
             self.assertEqual(len(files), 2)
 
+    def test_collect_report_files_skips_hidden_directories(self):
+        """Skill working state (.triage-state/ etc.) is not an artifact."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir) / "org" / "repo"
+            (repo / ".triage-state").mkdir(parents=True)
+            (repo / "repo-security-audit.json").write_text("{}", encoding="utf-8")
+            (repo / ".triage-state" / "phase1.json").write_text("{}", encoding="utf-8")
+            names = [f.name for f in collect_report_files(tmpdir)]
+            self.assertEqual(names, ["repo-security-audit.json"])
+
+    def test_collect_report_files_inside_a_hidden_root(self):
+        """Only directories below the swept root count, so sweeping a path
+        that itself sits under a dot-directory still finds its files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / ".cache" / "findings"
+            root.mkdir(parents=True)
+            (root / "repo-security-audit.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(len(collect_report_files(str(root))), 1)
+
+    def test_a_document_that_is_not_report_shaped_fails_without_raising(self):
+        """The identity and strict checks read findings directly; on a
+        malformed document they used to raise and abort the whole sweep."""
+        for document in (
+            {"phase": 1, "findings": 3},
+            {"phase": 1, "findings": ["FIND-001"]},
+            {"metadata": "x", "findings": []},
+            [1, 2, 3],
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "phase1.json"
+                path.write_text(json.dumps(document), encoding="utf-8")
+                r = validate_report(str(path), SCHEMA, strict=True)
+                self.assertFalse(r.passed, document)
+
 
 # ---------------------------------------------------------------------------
 # Renderer smoke test
@@ -1507,3 +1541,81 @@ class TestThreatModelArtifact(unittest.TestCase):
             {"boundary_id": "B1", "interface": "api", "kind": "http", "exposure": "public"}
         ]
         self.assertIn("## 10. Tenant boundaries", render.render_threat_model(populated))
+
+
+class TestArtifactKindDetection(unittest.TestCase):
+    """Artifacts that are not audit reports get their own schema by filename
+    and are not failed by the code-audit cross-checks."""
+
+    REFUTED_REGISTER = {
+        "source": "repo-triage.json",
+        "generated_at": "2026-01-01T00:00:00Z",
+        "entries": [
+            {
+                "finding_ref": "FIND-001",
+                "title": "Refuted claim",
+                "refute_reasons": ["misread_code"],
+                "tier": "countersign",
+                "evidence_refs": ["src/main.py:1"],
+                "asserted_at": "2026-01-01T00:00:00Z",
+                "asserted_by": "triage/1.0.0",
+                "note": "Execution evidence overrides.",
+            }
+        ],
+    }
+    PRIV_PROFILE = {
+        "repo": "example-operator",
+        "summary": {
+            "workloads": 1,
+            "privileged_or_host_workloads": 0,
+            "rbac_rules": 1,
+            "distinct_rule_triples": 1,
+            "distinct_cluster_triples": 0,
+            "cluster_scoped_rules": 0,
+            "scc_requests": [],
+            "wildcard_rules": 0,
+            "no_scc_request_recorded": True,
+        },
+    }
+
+    def test_each_kind_is_detected(self):
+        for name, schema in (
+            ("repo-remediation-verification.json", "verification.schema.json"),
+            ("repo-refuted-register.json", "refuted-register.schema.json"),
+            ("repo-priv-profile.json", "operator-priv-profile.schema.json"),
+            ("repo-operator-priv-profile.json", "operator-priv-profile.schema.json"),
+        ):
+            detected = validate.detect_schema_path(Path(name))
+            self.assertIsNotNone(detected, name)
+            self.assertEqual(detected.name, schema, name)
+
+    def _validate(self, name, document, strict=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / name
+            path.write_text(json.dumps(document), encoding="utf-8")
+            schema = load_schema(validate.detect_schema_path(path))
+            return validate.validate_report(
+                str(path), schema, strict=strict, registry=validate.build_registry()
+            )
+
+    def test_a_verification_report_passes_its_own_checks(self):
+        result = self._validate("repo-remediation-verification.json", _valid_verification_report())
+        self.assertTrue(result.passed, result.errors)
+
+    def test_registers_and_profiles_skip_the_audit_crosschecks(self):
+        """They have no severity_criteria or findings_summary, and must not
+        be failed for lacking them."""
+        for name, document in (
+            ("repo-refuted-register.json", self.REFUTED_REGISTER),
+            ("repo-priv-profile.json", self.PRIV_PROFILE),
+        ):
+            result = self._validate(name, document, strict=True)
+            self.assertTrue(result.passed, (name, result.errors))
+            self.assertEqual(result.warnings, [], name)
+
+    def test_the_schema_still_applies(self):
+        document = copy.deepcopy(self.REFUTED_REGISTER)
+        del document["entries"]
+        result = self._validate("repo-refuted-register.json", document)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("entries" in e for e in result.errors), result.errors)

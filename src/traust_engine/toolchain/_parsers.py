@@ -20,12 +20,6 @@ _GRYPE_DB_DIR = Path(
         Path.home() / ".cache" / "grype" / "db",
     )
 )
-_OSV_CACHE_DIR = Path(
-    os.environ.get(
-        "OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY",
-        Path.home() / ".cache" / "osv-scanner",
-    )
-)
 
 
 def _parse_grype_db_status() -> DBInfo:
@@ -60,22 +54,6 @@ def _parse_grype_db_status() -> DBInfo:
     )
 
 
-def _parse_osv_db_status() -> DBInfo:
-    """Check osv-scanner offline DB cache."""
-    if not _OSV_CACHE_DIR.is_dir():
-        return DBInfo(exists=False, path=str(_OSV_CACHE_DIR))
-
-    entries = [p for p in _OSV_CACHE_DIR.iterdir() if p.is_dir() or p.suffix == ".zip"]
-    if not entries:
-        return DBInfo(exists=False, path=str(_OSV_CACHE_DIR))
-
-    latest_mtime = max(e.stat().st_mtime for e in entries)
-    from datetime import UTC, datetime
-
-    built = datetime.fromtimestamp(latest_mtime, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return DBInfo(exists=True, built=built, path=str(_OSV_CACHE_DIR))
-
-
 def _parse_govulncheck_db_status() -> DBInfo:
     """govulncheck DB info is extracted from scan output, not a status command.
 
@@ -87,12 +65,23 @@ def _parse_govulncheck_db_status() -> DBInfo:
 
 _PARSERS: dict[str, callable] = {
     "grype": _parse_grype_db_status,
-    "osv-scanner": _parse_osv_db_status,
     "govulncheck": _parse_govulncheck_db_status,
 }
 
-# Tools that have no vuln DB
-_NO_DB_TOOLS = {"opengrep", "gitleaks", "syft", "skopeo", "cosign", "yara", "joern", "pip-audit"}
+# Tools that have no vuln DB the harness tracks. osv-scanner's offline
+# database exists only on air-gapped deployments, provided and kept current
+# by the adopter (owner decision 2026-10-20).
+_NO_DB_TOOLS = {
+    "opengrep",
+    "gitleaks",
+    "syft",
+    "skopeo",
+    "cosign",
+    "yara",
+    "joern",
+    "pip-audit",
+    "osv-scanner",
+}
 
 
 def db_status(tool_name: str) -> DBInfo | None:

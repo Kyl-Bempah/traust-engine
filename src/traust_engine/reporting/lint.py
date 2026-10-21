@@ -20,6 +20,7 @@ optional gaps (missing harness_version, missing section 8) to warnings shown
 in the summary; they never fail the run, matching validate_report.py --strict.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -104,12 +105,19 @@ THREATS_COLUMNS_OWASP = [
     "attack_refs",
 ]
 THREATS_COLUMNS_OWASP_ISOLATION = [*THREATS_COLUMNS_OWASP, "isolation_dimensions"]
-THREATS_COLUMN_VARIANTS = (
+_THREATS_BASE_VARIANTS = (
     THREATS_COLUMNS,
     THREATS_COLUMNS_ATTACK,
     THREATS_COLUMNS_ISOLATION,
     THREATS_COLUMNS_OWASP,
     THREATS_COLUMNS_OWASP_ISOLATION,
+)
+# Trailing OPTIONAL column, last: the review surfaces a threat sits on
+# (threat-model schema `review_surfaces`, traust-contracts 0.57.0), written
+# only when some threat carries them.
+THREATS_COLUMN_VARIANTS = (
+    *_THREATS_BASE_VARIANTS,
+    *([*v, "review_surfaces"] for v in _THREATS_BASE_VARIANTS),
 )
 
 # Section 10 "Tenant boundaries" (optional; multi-tenant services only).
@@ -145,7 +153,28 @@ ISOLATION_REVIEW_REF = re.compile(
 ASSETS_COLUMNS = ["asset", "description", "sensitivity"]
 ASSETS_OPTIONAL_COLUMNS = ["regulatory_scope", "example_records"]
 ENTRY_COLUMNS = ["entry_point", "description", "trust_boundary", "reachable_assets"]
+#: section 3 with the optional trailing review_surfaces column
+ENTRY_COLUMNS_SURFACES = [*ENTRY_COLUMNS, "review_surfaces"]
+
+
+def _review_surfaces() -> list[str]:
+    from traust_contracts.paths import enum_dir
+
+    return json.loads((enum_dir() / "review-surface.json").read_text(encoding="utf-8"))["values"]
+
+
+def _surface_errors(where: str, cell: str) -> list[str]:
+    """Each comma-separated value must be a review_surface id (empty is fine)."""
+    known = _review_surfaces()
+    return [
+        f"{where}: review_surfaces '{s}' not in {known}"
+        for s in (x.strip() for x in re.split(r"[,;]\s*", cell or "") if x.strip())
+        if s not in known
+    ]
+
+
 DEPRI_COLUMNS = ["threat", "reason"]
+DEPRI_COLUMNS_SURFACES = [*DEPRI_COLUMNS, "review_surfaces"]
 MITIG_COLUMNS = ["mitigation", "threat_ids", "closes_class", "effort"]
 UPDATE_HISTORY_COLUMNS = ["date", "changes", "reason"]
 
@@ -319,11 +348,16 @@ def lint_file(path, strict=False):
         cols, rows = parse_table(b)
         if cols is None:
             errors.append("section 3 has no entry-points table")
-        elif cols != ENTRY_COLUMNS:
-            errors.append(f"section 3 columns must be {ENTRY_COLUMNS}, got {cols}")
+        elif cols not in (ENTRY_COLUMNS, ENTRY_COLUMNS_SURFACES):
+            errors.append(
+                f"section 3 columns must be {ENTRY_COLUMNS} "
+                f"(optionally + ['review_surfaces']), got {cols}"
+            )
         for r in rows:
             if r and r[0]:
                 entry_points.append(r[0])
+                if cols == ENTRY_COLUMNS_SURFACES and len(r) == len(cols):
+                    errors += _surface_errors(f"section 3 '{r[0]}'", r[-1])
 
     # -- Section 4: Threats -----------------------------------------------
     threat_ids, surface_cells, threat_rows = [], [], []
@@ -340,7 +374,8 @@ def lint_file(path, strict=False):
                 f"(optionally + ['attack_refs'], optionally then "
                 f"+ ['isolation_dimensions']), or the OWASP-rated "
                 f"{THREATS_COLUMNS_OWASP} (optionally + "
-                f"['isolation_dimensions']), got {cols}"
+                f"['isolation_dimensions']), either optionally ending in "
+                f"'review_surfaces', got {cols}"
             )
         else:
             threat_cols = threat_cols_seen = cols
@@ -417,6 +452,7 @@ def lint_file(path, strict=False):
                                 f"section 4 {tid}: isolation_dimensions "
                                 f"'{d}' not in {ISOLATION_DIMENSIONS}"
                             )
+                errors += _surface_errors(f"section 4 {tid}", row.get("review_surfaces") or "")
             # sort order (warning: legacy models predate strict ordering)
             if "severity" in threat_cols:
                 keys = [threat_rating.order_key(threat_rating.parse_row(r)) for r in threat_rows]
@@ -442,8 +478,15 @@ def lint_file(path, strict=False):
     if b is not None:
         depri_text = "\n".join(b)
         cols, rows = parse_table(b)
-        if cols is not None and cols != DEPRI_COLUMNS:
-            errors.append(f"section 5 columns must be {DEPRI_COLUMNS}, got {cols}")
+        if cols is not None and cols not in (DEPRI_COLUMNS, DEPRI_COLUMNS_SURFACES):
+            errors.append(
+                f"section 5 columns must be {DEPRI_COLUMNS} "
+                f"(optionally + ['review_surfaces']), got {cols}"
+            )
+        if cols == DEPRI_COLUMNS_SURFACES:
+            for r in rows:
+                if r and r[0] and len(r) == len(cols):
+                    errors += _surface_errors(f"section 5 '{r[0]}'", r[-1])
 
     # -- Coverage invariant --------------------------------------------------
     surfaces_joined = " ".join(surface_cells).lower()

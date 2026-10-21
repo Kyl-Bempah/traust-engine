@@ -1,7 +1,7 @@
 """Compliance-boundary scope resolver (Phase 6).
 
-Resolves a declared compliance boundary (progress-tracker/configs/
-compliance/compliance-scope.yaml, schema-gated) into the concrete
+Resolves a declared compliance boundary (compliance-scope.yaml in the
+deployment config home, schema-gated) into the concrete
 repo set an assessment run scopes to. Frameworks scope SYSTEMS, not
 repos: the registry declares boundaries at service/product level and
 this resolver derives membership from the repo-graph product mapping
@@ -48,20 +48,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from traust_engine.locations import (
-    configured_locations,
-    progress_tracker_dir,
-    repo_graph,
-)
+from traust_contracts.config import deployment_config_dir
+
+from traust_engine.locations import configured_locations, repo_graph
 
 
-def default_scope_path(progress_tracker: Path | None = None) -> Path | None:
-    pt = (
-        progress_tracker
-        if progress_tracker is not None
-        else progress_tracker_dir(configured_locations())
-    )
-    return pt / "configs" / "compliance" / "compliance-scope.yaml" if pt else None
+def default_scope_path() -> Path | None:
+    """compliance-scope.yaml in the deployment config home (it may not exist yet)."""
+    home = deployment_config_dir()
+    return home / "compliance-scope.yaml" if home is not None else None
 
 
 def default_graph() -> Path | None:

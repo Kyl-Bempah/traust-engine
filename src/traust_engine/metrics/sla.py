@@ -1,7 +1,8 @@
 """Owner-response SLA views (C10) — clocks over the findings projection.
 
 SLAs are POLICY DATA, never code: this script ships with a default
-SLA policy file (`configs/sla-policy.yaml`, schema-validated against
+SLA policy file (`sla-policy.yaml` in the deployment config home, template
+`config/sla-policy.example.yaml` in traust; schema-validated against
 contracts/schemas/sla-policy.schema.json) and takes ANY other policy — customer
 contract SLAs, per-BU policies, FedRAMP profiles — via `--policy <file>`.
 To change an SLA, swap the file, never edit this script. The

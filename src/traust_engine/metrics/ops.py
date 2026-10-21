@@ -88,12 +88,22 @@ class MetricsOps(ContextOps):
     def session_project_dirs(self, workspace: Path | None = None) -> list[Path]:
         return collect_spend.workspace_slugs(workspace or self._workspace())
 
+    def _long_prompt_thresholds(self) -> dict[str, int]:
+        from traust_engine.registry.models import long_prompt_thresholds
+
+        return long_prompt_thresholds(self._model_registry())
+
     def collect_session_spend(self, dirs: list[Path], day: str | None = None) -> dict:
-        return collect_spend.collect(dirs, day)
+        return collect_spend.collect(dirs, day, self._long_prompt_thresholds())
 
     def append_session_spend(self, dirs: list[Path] | None = None) -> int:
         project_dirs = dirs if dirs is not None else self.session_project_dirs()
-        return collect_spend.append_rows(self._workspace(), project_dirs, journal=self._journal())
+        return collect_spend.append_rows(
+            self._workspace(),
+            project_dirs,
+            journal=self._journal(),
+            thresholds=self._long_prompt_thresholds(),
+        )
 
     def collect_attributed(
         self,
@@ -102,7 +112,9 @@ class MetricsOps(ContextOps):
         month: str | None = None,
         valid: set[str] | None = None,
     ) -> dict:
-        return attribute_spend.collect_attributed(dirs, day, month, valid)
+        return attribute_spend.collect_attributed(
+            dirs, day, month, valid, self._long_prompt_thresholds()
+        )
 
     def attribute_reconcile(
         self, dirs: list[Path], day: str | None = None, month: str | None = None
@@ -127,7 +139,8 @@ class MetricsOps(ContextOps):
     # --- SLA views -----------------------------------------------------------
 
     def default_sla_policy(self) -> Path:
-        return self._progress_tracker() / "configs" / "sla-policy.yaml"
+        """The deployment's SLA policy: ``sla-policy.yaml`` in the config home."""
+        return self._config_file("sla-policy.yaml")
 
     def sla_dashboard_dir(self) -> Path:
         return self._progress_tracker() / "metrics" / "dashboards" / "sla"

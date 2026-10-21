@@ -53,6 +53,11 @@ CONSISTENCY_MIN_VERSION = (0, 15, 0)
 # review_surface_coverage (traust-contracts 0.56.0): code-profile reports from
 # it on must carry the record.
 REVIEW_SURFACE_MIN_VERSION = (0, 20, 0)
+# Post-reset traust version whose /secure-rpm-audit, /vuln-scan and
+# /verify-remediation record review_surface_coverage (traust-contracts
+# 0.57.0): rpm-profile audits, vuln-findings and verification reports from it
+# on must carry the record.
+REVIEW_SURFACE_EXTENDED_MIN_VERSION = (0, 21, 0)
 
 # Recommended finding-category vocabulary (kebab-case). Free text remains
 # schema-valid, but strict mode warns on values outside this set for reports
@@ -666,11 +671,16 @@ def _cross_validate_review_surfaces(report: dict, result: ValidationResult):
     meta = report.get("metadata", {}) or {}
     record = report.get("review_surface_coverage")
     if record is None:
-        if meta.get("audit_profile") == "code" and _gate(meta, current=REVIEW_SURFACE_MIN_VERSION):
+        profile = meta.get("audit_profile")
+        since = {
+            "code": REVIEW_SURFACE_MIN_VERSION,
+            "rpm": REVIEW_SURFACE_EXTENDED_MIN_VERSION,
+        }.get(profile)
+        if since and _gate(meta, current=since):
             result.error(
-                "review_surface_coverage is required for code-profile audits from "
-                "traust 0.20.0 — record finding / negative / not_applicable / "
-                "not_assessed for each review surface"
+                f"review_surface_coverage is required for {profile}-profile audits from "
+                f"traust {'.'.join(map(str, since))} — record finding / negative / "
+                "not_applicable / not_assessed / out_of_scope for each review surface"
             )
         return
     if not isinstance(record, dict):
@@ -707,6 +717,57 @@ def _cross_validate_review_surfaces(report: dict, result: ValidationResult):
                 f"{where}: status not_assessed but metadata.additional.coverage_gaps "
                 f"has no {{tool: review-surfaces, system: {surface}}} entry"
             )
+
+
+def _cross_validate_scan_review_surfaces(
+    record,
+    result: ValidationResult,
+    *,
+    kind: str,
+    harness_version,
+    date,
+    ids: set,
+    diff_scoped: bool | None = None,
+):
+    """review_surface_coverage on a vuln-findings or verification report.
+
+    Required from REVIEW_SURFACE_EXTENDED_MIN_VERSION on. The schema checks the
+    shape (all six surfaces, valid statuses, a note on every status but
+    finding). The checks that need the rest of the report: every finding_id
+    names a finding of this scan (``ids``), and ``out_of_scope`` appears only
+    on a diff-scoped scan. ``diff_scoped`` is None when the report kind is
+    always diff-scoped (verification), else whether this scan was.
+    """
+    gate_meta = {"date": date or "", "additional": {"harness_version": harness_version}}
+    if record is None:
+        if _gate(gate_meta, current=REVIEW_SURFACE_EXTENDED_MIN_VERSION):
+            result.error(
+                f"review_surface_coverage is required for {kind} reports from traust "
+                f"{'.'.join(map(str, REVIEW_SURFACE_EXTENDED_MIN_VERSION))} — record "
+                "finding / negative / not_applicable / not_assessed / out_of_scope "
+                "for each review surface"
+            )
+        return
+    if not isinstance(record, dict):
+        return  # schema validation reports the type error
+    for surface in _review_surfaces():
+        entry = record.get(surface)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") == "out_of_scope" and diff_scoped is False:
+            result.error(
+                f"review_surface_coverage.{surface}: out_of_scope on a full scan — "
+                "out_of_scope is only for a diff-scoped scan "
+                "(metadata.additional.coverage_diff); record what the full scan found"
+            )
+        if entry.get("status") != "finding":
+            continue
+        for fid in entry.get("finding_ids") or []:
+            if fid not in ids:
+                result.error(
+                    f"review_surface_coverage.{surface}: finding_ids names {fid!r}, "
+                    f"which is not a finding of this {kind} report"
+                )
 
 
 def _default_signing_pubkey(pubkey: Path | None = None) -> str | None:
@@ -1188,6 +1249,16 @@ def cross_validate_vuln_findings(report: dict, result: ValidationResult):
     summary = report.get("summary", {})
     meta = report.get("metadata", {})
 
+    _cross_validate_scan_review_surfaces(
+        report.get("review_surface_coverage"),
+        result,
+        kind="vuln-findings",
+        harness_version=meta.get("harness_version"),
+        date=report.get("scanned_at"),
+        ids={f.get("id") for f in findings if isinstance(f, dict)},
+        diff_scoped=isinstance((meta.get("additional") or {}).get("coverage_diff"), dict),
+    )
+
     # 1. Finding ID uniqueness
     ids = [f.get("id") for f in findings]
     for fid, cnt in Counter(ids).items():
@@ -1249,6 +1320,18 @@ def cross_validate_verification(report: dict, result: ValidationResult):
     timeline = report.get("commit_timeline", [])
     summary = report.get("summary", {})
     meta = report.get("metadata", {})
+
+    # A verification's own findings are its regressions; an original finding
+    # it re-checked on a surface is named by original_id.
+    _cross_validate_scan_review_surfaces(
+        report.get("review_surface_coverage"),
+        result,
+        kind="verification",
+        harness_version=meta.get("harness_version"),
+        date=meta.get("date"),
+        ids={r.get("id") for r in regressions if isinstance(r, dict)}
+        | {f.get("original_id") for f in findings if isinstance(f, dict)},
+    )
 
     # 1. original_id uniqueness
     ids = [f.get("original_id") for f in findings]
@@ -1808,6 +1891,12 @@ def validate_report(
             # thing a schema cannot say: an OWASP rating's scores, levels
             # and severity must follow from its factors.
             cross_validate_threat_model(report, result)
+        elif "refuted-register" in sid or "operator-priv-profile" in sid:
+            # A refuted register (refutation worklist) and an operator
+            # privilege profile are not finding reports: the code-audit
+            # cross-checks (severity_criteria, findings_summary) do not fit
+            # them, so only the schema applies.
+            pass
         else:
             cross_validate(report, result)
 
@@ -1827,14 +1916,30 @@ def validate_report(
         # fingerprint, and its `provenance.target` is what records the
         # repository, not `metadata.repository`.
         "threat-model",
+        "refuted-register",
+        "operator-priv-profile",
     )
-    if not any(k in sid for k in _non_audit):
+    # These checks read findings and metadata directly. On a document that
+    # is not report-shaped they would raise and abort a whole directory
+    # sweep; its schema errors already say what is wrong.
+    if not any(k in sid for k in _non_audit) and _report_shaped(report):
         check_finding_identity(report, result)
         check_metadata_repository(report, result)
-    if strict and not any(k in sid for k in _non_audit):
-        strict_checks(report, result)
+        if strict:
+            strict_checks(report, result)
 
     return result
+
+
+def _report_shaped(report) -> bool:
+    """An object whose `metadata` (if present) is an object and whose
+    `findings` (if present) is a list of objects."""
+    if not isinstance(report, dict):
+        return False
+    if not isinstance(report.get("metadata", {}), dict):
+        return False
+    findings = report.get("findings", [])
+    return isinstance(findings, list) and all(isinstance(f, dict) for f in findings)
 
 
 def collect_report_files(path: str) -> list[Path]:
@@ -1842,8 +1947,13 @@ def collect_report_files(path: str) -> list[Path]:
     if target.is_dir():
         # Refuted registers are operational worklists (countersign/fuzzing
         # inputs), not schema'd reports — skip them in directory sweeps.
+        # Hidden directories (.triage-state/, .threat-model-state/, ...)
+        # hold skill working files, not artifacts.
         return sorted(
-            p for p in target.rglob("*.json") if not p.name.endswith("-refuted-register.json")
+            p
+            for p in target.rglob("*.json")
+            if not p.name.endswith("-refuted-register.json")
+            and not any(part.startswith(".") for part in p.relative_to(target).parts[:-1])
         )
     elif target.is_file():
         return [target]
@@ -1907,6 +2017,12 @@ def detect_schema_path(file_path: Path) -> Path | None:
         return SCHEMA_DIR / "threat-model.schema.json"
     if name.endswith("-impact-analysis.json"):
         return SCHEMA_DIR / "impact-analysis.schema.json"
+    if name.endswith("-remediation-verification.json"):
+        return SCHEMA_DIR / "verification.schema.json"
+    if name.endswith("-refuted-register.json"):
+        return SCHEMA_DIR / "refuted-register.schema.json"
+    if name.endswith("-priv-profile.json"):
+        return SCHEMA_DIR / "operator-priv-profile.schema.json"
     if name.endswith("-cloud-config-audit.json"):
         # Layer-2 cloud-config report: run_checkov.py --validate-report is
         # the canonical gate, but sweeps must not fail it against the

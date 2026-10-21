@@ -55,8 +55,39 @@ def workspace_slugs(workspace: Path) -> list[Path]:
     return [d for d in PROJECTS.iterdir() if d.is_dir() and d.name.startswith(prefix)]
 
 
-def collect(dirs: list[Path], day: str | None) -> dict:
-    """{date: {model: {tokens..., messages, sessions:set}}}"""
+#: Usage fields that make up a request's prompt, for long-prompt pricing.
+PROMPT_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+#: usage field -> the metrics-row name used in a long_prompt block.
+_ROW_NAMES = {
+    "input_tokens": "tokens_in",
+    "output_tokens": "tokens_out",
+    "cache_read_input_tokens": "cache_read",
+    "cache_creation_input_tokens": "cache_creation",
+}
+
+
+def add_usage(a: dict, usage: dict, threshold: int | None = None) -> None:
+    """Add one request's usage to a bucket.
+
+    When the model has a long-prompt threshold and this request's prompt
+    (input, cache reads and cache writes) is over it, the request's tokens
+    are also added to ``a["long_prompt"]``, so cost_usd can price them at
+    the long-prompt rates. Each request is judged on its own.
+    """
+    for k in TOKEN_KEYS:
+        a[k] += usage.get(k) or 0
+    if threshold is not None and sum(usage.get(k) or 0 for k in PROMPT_KEYS) > threshold:
+        lp = a.setdefault("long_prompt", {name: 0 for name in _ROW_NAMES.values()})
+        for k, name in _ROW_NAMES.items():
+            lp[name] += usage.get(k) or 0
+
+
+def collect(dirs: list[Path], day: str | None, thresholds: dict[str, int] | None = None) -> dict:
+    """{date: {model: {tokens..., messages, sessions:set[, long_prompt]}}}
+
+    ``thresholds`` maps a model to its long-prompt threshold
+    (registry.models.long_prompt_thresholds); requests over it are recorded
+    in the bucket's ``long_prompt`` block as well."""
     agg: dict = defaultdict(
         lambda: defaultdict(lambda: {k: 0 for k in TOKEN_KEYS} | {"messages": 0, "sessions": set()})
     )
@@ -84,15 +115,14 @@ def collect(dirs: list[Path], day: str | None) -> dict:
                     if not ts or (day and ts != day):
                         continue
                     a = agg[ts][model]
-                    for k in TOKEN_KEYS:
-                        a[k] += usage.get(k) or 0
+                    add_usage(a, usage, (thresholds or {}).get(model))
                     a["messages"] += 1
                     a["sessions"].add(sid)
     return agg
 
 
 def _row(model: str, a: dict) -> dict:
-    return {
+    row = {
         "model": model,
         "tokens_in": a["input_tokens"],
         "tokens_out": a["output_tokens"],
@@ -101,6 +131,9 @@ def _row(model: str, a: dict) -> dict:
         "messages": a["messages"],
         "sessions": len(a["sessions"]),
     }
+    if a.get("long_prompt"):
+        row["long_prompt"] = dict(a["long_prompt"])
+    return row
 
 
 def already_recorded(ws: Path, journal: Path | None = None) -> set[tuple[str, str]]:
@@ -113,9 +146,14 @@ def already_recorded(ws: Path, journal: Path | None = None) -> set[tuple[str, st
     return done
 
 
-def append_rows(ws: Path, dirs: list[Path], journal: Path | None = None) -> int:
+def append_rows(
+    ws: Path,
+    dirs: list[Path],
+    journal: Path | None = None,
+    thresholds: dict[str, int] | None = None,
+) -> int:
     today = datetime.date.today().isoformat()
-    agg = collect(dirs, None)
+    agg = collect(dirs, None, thresholds)
     done = already_recorded(ws, journal=journal)
     appended = 0
     for date in sorted(agg):

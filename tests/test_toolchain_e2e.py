@@ -34,8 +34,7 @@ requires_gitleaks = pytest.mark.skipif(not _has("gitleaks"), reason="gitleaks no
 
 # Presence on PATH is not the only precondition. Two tests assert a tool is
 # USABLE, and a tool can be installed and still not be: an untagged `go install`
-# govulncheck reports v0.0.0 (the manifest warns about exactly this), and
-# osv-scanner runs fine with no vulnerability database. Both then fail rather
+# govulncheck reports v0.0.0 (the manifest warns about exactly this). It then fails rather
 # than skip, which breaks this module's stated contract -- "safe to run on any
 # machine" -- for anyone whose toolchain is not fully provisioned. Gate on the
 # real precondition, and name it in the reason so the signal is not lost.
@@ -49,19 +48,10 @@ def _govulncheck_is_tagged() -> bool:
     ) not in (None, "0.0.0")
 
 
-def _osv_db_present() -> bool:
-    return _has("osv-scanner") and bool(db_status("osv-scanner").exists)
-
-
 requires_tagged_govulncheck = pytest.mark.skipif(
     not _govulncheck_is_tagged(),
     reason="govulncheck is absent or an untagged build (reports v0.0.0) — "
     "reinstall with `go install golang.org/x/vuln/cmd/govulncheck@vX.Y.Z`",
-)
-requires_osv_db = pytest.mark.skipif(
-    not _osv_db_present(),
-    reason="osv-scanner vulnerability DB not fetched — "
-    "run `osv-scanner --download-offline-databases`",
 )
 
 pytestmark = pytest.mark.integration
@@ -151,9 +141,10 @@ class TestOsvScannerE2E:
         flags = freeze_flags("osv-scanner")
         assert "--offline" in flags
 
-    def test_db_status_returns_info(self):
-        info = db_status("osv-scanner")
-        assert info is not None
+    def test_its_database_is_not_tracked(self):
+        # air-gapped only, adopter-provided: the harness neither fetches nor
+        # reports osv-scanner's offline database
+        assert db_status("osv-scanner") is None
 
 
 @requires_govulncheck
@@ -230,7 +221,6 @@ class TestPreflightE2E:
         assert "does not meet pin" in msgs[0]
 
     @requires_osv
-    @requires_osv_db
     @requires_grype
     def test_multi_tool_preflight(self):
         results = preflight(

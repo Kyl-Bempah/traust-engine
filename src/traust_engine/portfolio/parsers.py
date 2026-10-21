@@ -258,8 +258,94 @@ def parse_pnpm_lock(text: str) -> Parsed:
 # ------------------------------------------------------------------- PyPI
 _REQ_LINE_RE = re.compile(
     r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*"
+    r"(?:\[[^\]]*\])?\s*"  # optional extras: name[extra1,extra2]==ver
     r"(?:===|==|>=|<=|~=|!=|<|>)\s*([^\s;,]+)"
 )
+
+
+_YARN_VERSION_RE = re.compile(r'^\s+version:?\s+"?([^"\s]+)"?\s*$')
+
+
+def _yarn_name(spec: str) -> str | None:
+    """Package name from one yarn.lock key specifier.
+
+    Classic: ``lodash@^4.17.0`` / ``@scope/x@1.2.3``. Berry adds a protocol:
+    ``lodash@npm:^4.17.0``; workspace, link, portal and file protocols are
+    local packages, not registry ones, and are skipped."""
+    spec = spec.strip().strip('"')
+    at = spec.find("@", 1)  # a leading @ belongs to the scope
+    if at <= 0:
+        return None
+    name, rng = spec[:at], spec[at + 1 :]
+    if rng.startswith(("workspace:", "link:", "portal:", "file:", "exec:")):
+        return None
+    if rng.startswith("npm:") and "@" in rng[4:].lstrip("@"):  # alias: x@npm:real@^1
+        real = rng[4:]
+        at = real.find("@", 1)
+        return real[:at] if at > 0 else None
+    return name
+
+
+def parse_yarn_lock(text: str) -> Parsed:
+    """yarn.lock, classic (v1) and Berry (v2+): one dep per resolved
+    (name, version). The lock does not mark direct deps -> all indirect=True;
+    no self name -> declared None."""
+    deps: list[Dep] = []
+    seen: set[tuple[str, str]] = set()
+    names: list[str] = []
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            key = line.rstrip().rstrip(":")
+            names = (
+                []
+                if key == "__metadata"
+                else [n for n in (_yarn_name(s) for s in key.split(",")) if n]
+            )
+            continue
+        if not names:
+            continue
+        m = _YARN_VERSION_RE.match(line)
+        if m and line.startswith("  ") and not line.startswith("   "):
+            version = m.group(1)
+            for name in dict.fromkeys(names):
+                if (name, version) not in seen:
+                    seen.add((name, version))
+                    deps.append((name, version, True))
+            names = []
+    return None, deps
+
+
+def parse_uv_lock(text: str) -> Parsed:
+    """uv.lock: [[package]] name+version tables from registry, git or URL
+    sources. Workspace members (editable, virtual, directory or path
+    sources) are the project itself, not dependencies, and are skipped. The
+    lock does not mark direct deps -> all indirect=True; declared None."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        return None, []
+    try:
+        data = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError, TypeError):
+        return None, []
+    deps: list[Dep] = []
+    for pkg in data.get("package") or [] if isinstance(data, dict) else []:
+        if not isinstance(pkg, dict):
+            continue
+        source = pkg.get("source") or {}
+        if isinstance(source, dict) and source.keys() & {
+            "editable",
+            "virtual",
+            "directory",
+            "path",
+        }:
+            continue
+        name, version = pkg.get("name"), pkg.get("version")
+        if isinstance(name, str) and isinstance(version, str) and name and version:
+            deps.append((_pep503(name), version, True))
+    return None, deps
 
 
 def parse_requirements_txt(text: str) -> Parsed:
@@ -962,10 +1048,17 @@ def parse_helm_chart(text: str) -> Parsed:
 # listed here: *.gemspec (ruby, repo-root glob) and *.csproj (nuget, glob).
 # parser_for() resolves those by suffix.
 ECOSYSTEM_MANIFESTS: dict[str, list[str]] = {
-    "npm": ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "package.json"],
+    "npm": [
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "package.json",
+    ],
     "pypi": [
         "poetry.lock",
         "Pipfile.lock",
+        "uv.lock",
         "requirements.txt",
         "pyproject.toml",
         "setup.py",
@@ -1018,9 +1111,11 @@ PARSER_BY_FILENAME: dict[str, tuple[str, callable]] = {
     "package-lock.json": ("npm", parse_package_lock),
     "npm-shrinkwrap.json": ("npm", parse_npm_shrinkwrap),
     "pnpm-lock.yaml": ("npm", parse_pnpm_lock),
+    "yarn.lock": ("npm", parse_yarn_lock),
     "package.json": ("npm", parse_package_json),
     "poetry.lock": ("pypi", parse_poetry_lock),
     "Pipfile.lock": ("pypi", parse_pipfile_lock),
+    "uv.lock": ("pypi", parse_uv_lock),
     "requirements.txt": ("pypi", parse_requirements_txt),
     "pyproject.toml": ("pypi", parse_pyproject_deps),
     "setup.py": ("pypi", parse_setup_py),
@@ -1046,7 +1141,7 @@ def parser_for(filename: str):
     """(ecosystem, parser) for a manifest filename, or None if unknown.
     Accepts a bare name or a path (basename is used) and resolves the glob
     manifests by suffix: *.gemspec -> ruby, *.csproj -> nuget,
-    requirements*.txt -> pypi, and Dockerfile.* / *.Dockerfile -> docker.
+    *requirements*.txt -> pypi, and Dockerfile.* / *.Dockerfile -> docker.
 
     NOTE: GitHub Actions workflows are PATH-based (they are ordinary
     *.yml/*.yaml files distinguished only by living under
@@ -1060,7 +1155,9 @@ def parser_for(filename: str):
         return ("ruby", parse_gemspec)
     if base.endswith(".csproj"):
         return ("nuget", parse_csproj)
-    if base.startswith("requirements") and base.endswith(".txt"):
+    # requirements.txt, requirements-dev.txt, dev-requirements.txt,
+    # py3.10-ci-requirements.txt, requirements/test.txt-style compiles…
+    if base.endswith(".txt") and "requirements" in base.lower():
         return ("pypi", parse_requirements_txt)
     if base.startswith("Dockerfile.") or base.endswith(".Dockerfile"):
         return ("docker", parse_dockerfile)

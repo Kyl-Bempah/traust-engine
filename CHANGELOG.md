@@ -2,6 +2,345 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.37.1]
+
+- **Fixed: `go.mod` `replace` directives were ignored** by the dependency
+  pre-scan; the shared `parse_gomod` doesn't read them.
+  - **A require replaced with a directory in the checkout**
+    (`go.etcd.io/etcd/server/v3 => ./server`) is the project's own
+    module. It is no longer looked up as a published package. On etcd
+    that removes 3 false positives and 45 such requires.
+  - **A require replaced with another module or version** queries what
+    actually builds: `github.com/old/lib => github.com/fork/lib v1.2.5`,
+    or ARO-RP's 22 version pins such as
+    `k8s.io/api => k8s.io/api v0.29.15`.
+  - Version-specific replaces apply only to the version they name. The
+    module's own path is never a dependency.
+  - Provenance counts both: `go_requires_replaced_locally` and
+    `go_requires_replaced_by_module`.
+
+## [0.37.0]
+
+- **Test and dev dependencies are tagged, never skipped** (owner decision
+  2026-10-21). The dependency pre-scan reads each manifest's scope:
+  - Maven `<scope>test</scope>`, including under `dependencyManagement`;
+  - npm `devDependencies`;
+  - Cargo `[dev-dependencies]`;
+  - Poetry dev-dependencies and non-main groups.
+
+  The shared parsers merge those sections, so `declared_scopes` reads them
+  in the adapter. A deps.dev-resolved tree inherits its direct
+  dependency's scope.
+  - A candidate carries `dependency_scope: test` or `dev` only when
+    **every** path to it is test or dev. A runtime path removes the tag,
+    so an untagged candidate means runtime or unknown.
+  - On keycloak, 114 of 203 deps.dev-resolved candidates are `test`
+    (JMeter, ApacheDS, Arquillian trees) and 13 more are `dev`.
+
+## [0.36.0]
+
+- **Manifests without a lockfile are resolved through deps.dev** (owner
+  decisions 2026-10-20 option c and 2026-10-21: on by default, opt-out by
+  configuration).
+  - **New `traust_engine.depsdev` client** for
+    `GET /v3/systems/{system}/packages/{name}/versions/{version}:dependencies`
+    (npm, PyPI, Maven, Cargo) and the package's default version.
+    - It follows the OSV client's failure rule: `ok`, `not-found` (404),
+      or `unreachable` / `quota-deferred` / `error`, and never an empty
+      graph on failure.
+    - Low concurrency and an optional on-disk cache (24 h; failures are
+      never cached).
+    - `ATTRIBUTION` carries the CC BY 4.0 notice for deps.dev-generated
+      data. API use is subject to the Google APIs Terms of Service.
+  - **`adapters.osv.resolve_transitive`**, used by
+    `scan_api(..., resolver=)`:
+    - every direct declaration of an unresolved manifest is resolved on
+      its own;
+    - the packages in its graph join the OSV lookup with
+      `version_basis: resolved` and `resolved_via`;
+    - a declaration with no version resolves at deps.dev's default version
+      (`version_basis: resolved-default`), what an install gets today.
+  - **A declared name overrides resolved versions where only one version
+    installs.** For PyPI the rule applies per requirements file, since
+    each file is its own environment. For Maven it is repo-wide, since
+    parent poms manage versions for every module. npm and Cargo keep every
+    version.
+  - **Coverage:** a manifest moves to `resolved_manifests` only when every
+    declaration resolved. Otherwise it stays in `unresolved_manifests`
+    with a `reason`.
+  - **Provenance:** a `resolution` block with source, time, counts,
+    issues, cache hits, license and attribution.
+- **Fixed: requirement lines with no version** (`requests`,
+  `flask[async]`) were dropped by the shared parser and never counted.
+  Coverage was overstated. They now count as declarations, and deps.dev
+  resolves them.
+
+## [0.35.1]
+
+- **`adapters/osv_sbom.py` fixes from the 0.35.0 review:**
+  - `scan_sbom` now validates a dict input the same way `load_syft` validates
+    a file: a CycloneDX or SPDX document passed as a dict raises
+    `SbomFormatError` instead of silently returning a "complete" scan with
+    zero candidates.
+  - `grype_os_installed_matches` attributes a match through its artifact id —
+    grype carries syft's ids, which name the exact copy — so two OS packages
+    that each installed the same name+version are never conflated, and a
+    match without locations is still attributed. Without a usable id, the
+    purl plus the match's paths decide: an app-installed copy of an
+    RPM-installed name+version (under `/opt` vs `/usr`) is no longer labeled
+    `installed_by` the RPM.
+
+## [0.35.0]
+
+- **Container images: language packages through OSV** (`adapters/osv_sbom.py`,
+  owner decision 2026-10-20, option b). It reads a **syft JSON** SBOM and
+  sends only language packages through the shared OSV client and the
+  pre-scan's `lookup`: npm, PyPI, Maven, Go modules including the Go
+  standard library, Cargo, RubyGems and NuGet. OS packages (rpm, deb, apk)
+  stay with grype and the distribution's security data.
+  - **A language package installed by an OS package is skipped**, using
+    syft's `ownership-by-file-overlap` relationships. A Red Hat RPM such as
+    `python3-urllib3` carries backported fixes under an unchanged upstream
+    version, so an upstream lookup would report CVEs it already fixes. On
+    `ubi9/python-311`, 216 of 218 language packages were RPM-installed.
+  - CycloneDX and SPDX are refused (`SbomFormatError`): they drop those
+    relationships.
+  - **Provenance** gives the same `status` (`complete` / `degraded` /
+    `failed`, with the fail-fast probe), plus what was skipped and why:
+    OS-installed (by type), unversioned (Go main modules), and
+    unsupported types (generic binaries, which grype matches by CPE).
+  - `mark_grype_duplicates` tags `also_in_grype` when grype reported the
+    same package (purl identity) and the same advisory (OSV id, alias or
+    upstream id).
+  - `grype_os_installed_matches` lists grype's own matches on language
+    packages an OS package installed, with the owning packages. grype
+    applies file ownership only partly, even on syft JSON: on
+    `ubi9/python-311`, 26 of its 32 language-package matches (1 critical,
+    12 high) were against packages the nodejs, npm and
+    python3.11-setuptools RPMs installed.
+  - **Air-gapped:** `write_cyclonedx` and `run_offline` give the filtered
+    packages to osv-scanner offline (`-L <file>.cdx.json --offline`), and
+    `parse_offline` restores the image paths. On external-secrets v0.9.0
+    this matched the API exactly (205/205).
+- **`lookup` candidates carry `upstream`**: Red Hat OSV records list
+  their CVEs there, not in `aliases`.
+
+## [0.34.0]
+
+- **The harness no longer fetches or tracks osv-scanner's offline
+  database** (scanner-currency step 6, owner decision 2026-10-20). OSV is
+  queried through its API; an air-gapped deployment provides osv-scanner and
+  its database itself.
+  - `toolchain._fetch_dbs` populates grype only; `db_status("osv-scanner")`
+    is `None` (no tracked database), and `db_cache_dirs()` no longer
+    includes an osv-scanner cache, so offline bundles carry grype's only.
+  - Kept for air-gapped runs: `adapters.osv.run_scanner` / `parse_output`
+    and the `--offline` freeze flag.
+
+## [0.33.0]
+
+- **The osv adapter queries the OSV API; no scanner binary or local
+  database is needed** (owner decision 2026-10-20). `adapters/osv.py` reads
+  the checkout's lockfiles and manifests with the portfolio parsers (plus
+  `go.mod`, with the Go stdlib version from `toolchain`/`go`), then looks
+  every package up through the new shared client.
+  - **`traust_engine.osv`** is the one OSV client for every caller:
+    `querybatch` with page tokens followed, `vulns/{id}` details, retries
+    with backoff. **A failed lookup is never an empty result**: unanswered
+    queries are `None` and counted as `unreachable`, `quota-deferred` or
+    `error`.
+  - **Lookup provenance** comes with every scan: source, query time,
+    packages per ecosystem, unanswered packages, missing details, and
+    `status`: `complete`, `degraded` (some lookups failed), or `failed`.
+  - **An unusable API fails fast.** One probe lookup runs before the scan;
+    if it fails, or if no package at all is answered, the status is
+    `failed` with a `failure` block (`status`, `detail`), no candidates,
+    and `scan()` raises `RuntimeError`. Before, an outage retried every
+    batch and read as a degraded scan.
+  - **`transitive_coverage`** is `partial` when a manifest has no lockfile
+    beside it, and `unresolved_manifests` lists those files. A requirements
+    file that pins every line counts too unless it was compiled
+    (`pip-compile` / `uv pip compile`: `# via` or `--hash=` lines), since
+    pinned direct dependencies say nothing about the rest of the tree. Their direct
+    declarations are queried at the declared floor (`version_basis:
+    manifest-floor`); the transitive tree is not resolved. Owner decision
+    (c): report this as a coverage gap now; deps.dev resolution may follow.
+  - **Severity:** `max_severity` is a CVSS v3 base score computed from the
+    record's vector (new `osv.cvss` calculator), or one borrowed from a GHSA
+    or CVE alias, or the record's declared word. `severity_basis` says which.
+    `MAL-` malicious-package advisories are critical. An advisory with no
+    score anywhere is `unscored`, banded medium by the harness rule and
+    labelled so it is never mistaken for a scored medium.
+  - The osv-scanner functions (`run_scanner`, `parse_output`) stay for
+    **air-gapped deployments**, which run osv-scanner offline against a
+    local OSV database the adopter provides. The API is the default; the
+    harness installs neither the binary nor the database.
+- **Parser fixes** (they also affect the portfolio graph):
+  - `requirements.txt` lines with extras (`aiohttp[speedups]==3.14.1`) were
+    dropped.
+  - Requirements files are recognised by any name containing
+    `requirements` (`dev-requirements.txt`, `py3.10-ci-requirements.txt`),
+    not only `requirements*.txt`.
+  - New `yarn.lock` (classic and Berry) and `uv.lock` parsers. Workspace
+    members are the project itself and are skipped.
+- **Numeric CVSS scores are banded** (9.0+ critical, 7.0+ high, 4.0+ medium,
+  below 4.0 low). Before, every numeric score fell through to medium.
+
+## [0.32.0]
+
+- **The migration command line moves out of the package.** The engine is a
+  library: `tests/test_no_cli_entrypoints.py` forbids `argparse`, `def main`
+  and `__main__` blocks in `src/traust_engine`. `corpus/migrate_cli.py`
+  (2026-09-29) broke all three tests, which had failed on main ever since.
+  - `scripts/migrate.py` (outside the package) parses arguments and prints.
+    `make migrate-plan`, `make migrate-run` and `make migrate-inspect` run it
+    engine-locally, unchanged.
+  - `traust_engine.corpus.migrate` holds the logic as library functions:
+    `load_profile`, `resolve_options`, `inspect_summary`, `resolve_database`,
+    `prepare_output`, `execute`, `summary`, `exit_code`.
+  - `python -m traust_engine.corpus.migrate_cli` no longer exists; use
+    `uv run python scripts/migrate.py`. Flags, profile keys, output and exit
+    codes are unchanged.
+  - The old docstring named a `traust corpus migrate-postgres` wrapper; no
+    such command exists, and the reference is gone.
+
+## [0.31.0]
+
+- **Nothing reads `progress-tracker/configs/` any more.** Deployment config
+  lives in the config home (`TRAUST_CONFIG_HOME`); public reference data
+  ships in the package.
+  - **SLA policy:** `metrics.default_sla_policy()` is `sla-policy.yaml` in the
+    config home. When it's missing, it raises `DeploymentConfigMissing`
+    naming traust's `config/sla-policy.example.yaml`; it never falls back to
+    another tree. `--policy` still overrides.
+  - **Compliance scope:** `compliance.scope_registry()` and
+    `scope.default_scope_path()` point at `compliance-scope.yaml` in the
+    config home. The file may not exist until a scope is declared.
+  - **Compliance reference data ships in the engine** (`data/compliance/`,
+    reached with `assets.compliance_data_dir()`): the NIST 800-53 rev5 spine,
+    the 800-53B High and Moderate profiles, the PCI DSS v4, SOC 2 and GDPR
+    catalogs, their provenance, and the harness's control-to-check mapping
+    (`compliance-mapping.yaml`). A deployment that needs a different mapping
+    passes `--registry`.
+- `compliance.dashboard.build()` drops its `progress_tracker` argument, which
+  it used only to find the scope registry.
+
+## [0.30.0]
+
+- **Section 5 (Deprioritized) carries review-surface tags.** traust-contracts
+  0.60.0 lets a deprioritized threat carry `review_surfaces`. The renderer adds
+  a trailing `review_surfaces` column to section 5 when any row is tagged (an
+  untagged section renders as before), and the linter accepts that column and
+  checks each value against the enum.
+- **Pins traust-contracts 0.60.0 and traust-ledger 0.11.3.** The vuln-findings
+  schema now enforces the full-scan `out_of_scope` rule itself; this
+  validator's cross-check stays and reports the same rule.
+
+## [0.29.0]
+
+- **Threat-model review-surface tags survive the Markdown.** The rendered
+  `<repo>-threat-model.md` used to drop `review_surfaces`
+  (traust-contracts 0.57.0), so a reader of the `.md` couldn't see which
+  threats and entry points sit on a review surface.
+  - **Renderer:** adds a trailing `review_surfaces` column to section 3
+    (entry points) and section 4 (threats) when any row carries tags. An
+    untagged model renders exactly as before.
+  - **Linter** (the prose contract): accepts that optional trailing column
+    in both sections and checks every value against the `review_surface`
+    enum.
+  - **Corpus parser** (`parse_threats`): reads the tags back, so the
+    round trip stays lossless.
+
+## [0.28.0]
+
+- **Python rule pack v1.9: two misses from the `team-notes` recall-fixture
+  run.**
+  - `traust-python-injection-like-wildcard-unescaped` catches a bound
+    f-string parameter with an interpolation and a `%` anywhere in it
+    (`(f"{owner}/{folder}/%",)`).
+  - `traust-python-ssrf-request-taint` gains `request.get_json`,
+    `request.json.get`, `request.values.get` and `request.form[...]`
+    sources, and more `requests`/`httpx` sinks. A database fetch ends
+    request taint.
+  - New `traust-python-ssrf-stored-url` (CWE-918, low confidence) flags an
+    outbound call whose URL is a database row subscript or a url-type model
+    field. Operator config, settings, environment and API response objects
+    are excluded.
+  - On five estate repos, nothing outside these rules changed. The
+    fixture's two misses are now found. Two new candidates in
+    qontract-reconcile: Prometheus URLs from model fields.
+
+## [0.27.0]
+
+- **Per-model cache rates and long-prompt pricing** (traust-contracts 0.59.0).
+  - `cost_usd` prices cache hits at the model's `cache_read_multiplier`
+    (0.1 when unset).
+  - It takes an optional `long_prompt` usage block (`tokens_in`,
+    `tokens_out`, `cache_read`, `cache_creation`): the tokens from requests
+    over the model's long-prompt threshold. Those are priced at the
+    long-prompt rates and the rest at base rates.
+  - **Collectors:** both transcript collectors (`collect_spend.collect`,
+    `attribute_spend.collect_attributed`) judge each request on its own. A
+    request whose prompt (input, cache reads and cache writes) is over the
+    model's threshold is also counted in the bucket's `long_prompt`, and
+    metrics rows carry it when it's non-zero.
+  - **Reports:** every report that re-derives cost from a row
+    (`metrics/spend.py`) passes it through.
+  - New helpers: `long_prompt_thresholds()` and `collect_spend.add_usage()`.
+    The `HarnessEngine.models` facade exposes `long_prompt_thresholds()`, and
+    its `cost_usd` takes `long_prompt`.
+  - Old rows have no `long_prompt` block and keep base pricing.
+- **`out_of_scope` only on diff scans.** A vuln-findings
+  `review_surface_coverage` entry of `out_of_scope` is an error unless the
+  report carries `metadata.additional.coverage_diff` (traust-contracts
+  0.58.0). Verification reports are always diff-scoped.
+- Pins traust-contracts `f7869db` (0.59.0) and traust-ledger `2ffc506`.
+
+## [0.26.0]
+
+- **Review-surface coverage is checked on the scans that follow an audit,
+  and on rpm audits** (traust-contracts 0.57.0).
+  - `vuln-findings` and `verification` reports from traust 0.21.0 on must
+    carry `review_surface_coverage`. The schema already checks its shape,
+    including the note that every status except `finding` needs. The validator
+    adds one check: each `finding_ids` entry must be a finding of the scan
+    itself. For vuln-findings that means `findings[].id`; for verification,
+    `regressions[].id` or a re-checked original finding's `original_id`.
+  - rpm-profile audits from traust 0.21.0 on must carry the record, as
+    code-profile audits have since 0.20.0. Container audits still don't.
+  - Gating is epoch-aware (`_gate`) and reads each scan's own fields: the
+    top-level `metadata.harness_version`, with `metadata.date` for
+    verification and `scanned_at` for vuln-findings. Earlier reports are
+    unaffected.
+  - The audit requirement's error now names the profile and lists
+    `out_of_scope` among the statuses.
+
+## [0.25.2]
+
+- **Directory sweeps no longer crash on skill working files.**
+  `collect_report_files` skips hidden directories below the swept root
+  (`.triage-state/`, `.threat-model-state/` and similar), which hold skill
+  working state, not artifacts.
+- **The identity, repository and strict checks run only on a report-shaped
+  document:** an object whose `metadata` is an object and whose `findings` is
+  a list of objects. On anything else they raised (`'str' object has no
+  attribute 'get'`), which aborted the sweep for the whole directory. Such a
+  document still fails on its schema errors.
+
+## [0.25.1]
+
+- **The validator detects three more artifact kinds by filename.**
+  `*-remediation-verification.json`, `*-refuted-register.json` and
+  `*-priv-profile.json` fell through to the audit-report schema, so every one
+  of them failed `traust reporting validate`, in a directory sweep or on its
+  own. They now validate against `verification.schema.json`,
+  `refuted-register.schema.json` and `operator-priv-profile.schema.json`.
+  - Verification reports get their existing cross-checks.
+  - Refuted registers and privilege profiles are not finding reports, so
+    they are schema-only, like `cloud-config-audit`. They skip the code-audit
+    cross-checks, the identity and repository checks, and strict mode.
+  - Directory sweeps still skip refuted registers.
+
 ## [0.25.0]
 
 - **Version gates read the audit date first, so they hold across the
