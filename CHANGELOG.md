@@ -2,6 +2,24 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.37.0]
+
+- **Test and dev dependencies are tagged, never skipped** (owner decision
+  2026-10-21). The dependency pre-scan reads each manifest's scope:
+  - Maven `<scope>test</scope>`, including under `dependencyManagement`;
+  - npm `devDependencies`;
+  - Cargo `[dev-dependencies]`;
+  - Poetry dev-dependencies and non-main groups.
+
+  The shared parsers merge those sections, so `declared_scopes` reads them
+  in the adapter. A deps.dev-resolved tree inherits its direct
+  dependency's scope.
+  - A candidate carries `dependency_scope: test` or `dev` only when
+    **every** path to it is test or dev. A runtime path removes the tag,
+    so an untagged candidate means runtime or unknown.
+  - On keycloak, 114 of 203 deps.dev-resolved candidates are `test`
+    (JMeter, ApacheDS, Arquillian trees) and 13 more are `dev`.
+
 ## [0.36.0]
 
 - **Manifests without a lockfile are resolved through deps.dev** (owner

@@ -289,3 +289,80 @@ def test_the_maven_override_is_repo_wide(tmp_path):
     block = osv.resolve_transitive(packages, stats, FakeResolver(answers))
     assert ("Maven", "org.yaml:snakeyaml", "2.2") not in packages
     assert block["overridden_by_declaration"] == 1
+
+
+# -- test / dev scope tagging (owner decision 2026-10-21: tag, never skip) ------
+
+
+def test_declared_scopes():
+    pkg = '{"dependencies": {"a": "1"}, "devDependencies": {"jest": "29.0.0", "a": "1"}}'
+    assert osv.declared_scopes("package.json", pkg) == {"jest": "dev"}
+    pom = (
+        "<project><dependencies>"
+        "<dependency><groupId>junit</groupId><artifactId>junit</artifactId>"
+        "<version>4.12</version><scope>test</scope></dependency>"
+        "<dependency><groupId>org.x</groupId><artifactId>core</artifactId>"
+        "<version>1</version></dependency>"
+        "</dependencies></project>"
+    )
+    assert osv.declared_scopes("pom.xml", pom) == {"junit:junit": "test"}
+    cargo = '[dependencies]\nserde = "1"\n[dev-dependencies]\nproptest = "1"\n'
+    assert osv.declared_scopes("Cargo.toml", cargo) == {"proptest": "dev"}
+    poetry = (
+        '[tool.poetry.dependencies]\nrequests = "2"\n'
+        '[tool.poetry.group.test.dependencies]\nPy_Test = "7"\n'
+    )
+    assert osv.declared_scopes("pyproject.toml", poetry) == {"py-test": "dev"}
+    assert osv.declared_scopes("package.json", "not json") == {}
+
+
+def _pom(tmp_path, deps):
+    dep = (
+        "<dependency><groupId>{}</groupId><artifactId>{}</artifactId>"
+        "<version>{}</version>{}</dependency>"
+    )
+    body = "".join(dep.format(g, a, v, f"<scope>{s}</scope>" if s else "") for g, a, v, s in deps)
+    write(tmp_path, "pom.xml", f"<project><dependencies>{body}</dependencies></project>")
+
+
+def test_a_test_scoped_tree_is_tagged_test(tmp_path):
+    _pom(tmp_path, [("org.apache.jmeter", "ApacheJMeter_java", "2.10", "test")])
+    packages, stats = osv.collect_packages(tmp_path)
+    key = ("Maven", "org.apache.jmeter:ApacheJMeter_java", "2.10")
+    answers = {key: Resolution("ok", [("org.bouncycastle:bcprov-jdk15on", "1.49", "INDIRECT")])}
+    osv.resolve_transitive(packages, stats, FakeResolver(answers))
+    assert (
+        osv._scope_tag(packages[("Maven", "org.bouncycastle:bcprov-jdk15on", "1.49")]["scopes"])
+        == "test"
+    )
+    assert osv._scope_tag(packages[key]["scopes"]) == "test"
+
+
+def test_a_runtime_path_removes_the_tag(tmp_path):
+    _pom(tmp_path, [("org.x", "testlib", "1.0", "test"), ("org.x", "app", "1.0", None)])
+    packages, stats = osv.collect_packages(tmp_path)
+    shared = ("org.x:shared", "2.0", "DIRECT")
+    answers = {
+        ("Maven", "org.x:testlib", "1.0"): Resolution("ok", [shared]),
+        ("Maven", "org.x:app", "1.0"): Resolution("ok", [shared]),
+    }
+    osv.resolve_transitive(packages, stats, FakeResolver(answers))
+    assert osv._scope_tag(packages[("Maven", "org.x:shared", "2.0")]["scopes"]) is None
+
+
+def test_candidates_carry_dependency_scope(tmp_path):
+    write(tmp_path, "web/package.json", '{"devDependencies": {"jest": "29.0.0"}}')
+
+    class OneHit(FakeOsv):
+        def query_batch(self, queries):
+            return BatchOutcome(
+                [["GHSA-j"] if q.name == "jest" else [] for q in queries], Counter()
+            )
+
+        def get_vulns(self, ids):
+            return {"GHSA-j": {"id": "GHSA-j"}}, Counter()
+
+    doc = osv.scan_api(tmp_path, OneHit())
+    (c,) = doc["candidates"]
+    assert c["dependency_scope"] == "dev"
+    json.dumps(doc)  # nothing unserialisable (the internal scope sets) leaks out
