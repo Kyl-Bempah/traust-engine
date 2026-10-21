@@ -25,9 +25,11 @@ All notable changes to traust-engine are documented here.
       `version_basis: resolved` and `resolved_via`;
     - a declaration with no version resolves at deps.dev's default version
       (`version_basis: resolved-default`), what an install gets today.
-  - **For PyPI and Maven, a declared name overrides resolved versions**:
-    pip installs one version per package, and Maven takes the version the
-    project declares or manages. npm and Cargo keep every version.
+  - **A declared name overrides resolved versions where only one version
+    installs.** For PyPI the rule applies per requirements file, since
+    each file is its own environment. For Maven it is repo-wide, since
+    parent poms manage versions for every module. npm and Cargo keep every
+    version.
   - **Coverage:** a manifest moves to `resolved_manifests` only when every
     declaration resolved. Otherwise it stays in `unresolved_manifests`
     with a `reason`.

@@ -263,3 +263,29 @@ def test_default_version_reads_is_default():
     assert res.nodes == [("httpx", "0.28.1", "DEFAULT")]
     assert op.urls == ["https://dd.test/v3/systems/pypi/packages/httpx"]
     assert client({"versions": []})[0].default_version("PyPI", "x").status == "not-found"
+
+
+def test_the_pypi_override_is_per_requirements_file(tmp_path):
+    write(tmp_path, "requirements.txt", "requests==2.19.0\nurllib3==1.20\n")
+    write(tmp_path, "docs/requirements.txt", "requests==2.19.0\n")
+    packages, stats = osv.collect_packages(tmp_path)
+    answers = {REQ: Resolution("ok", [("urllib3", "1.23", "DIRECT")])}
+    osv.resolve_transitive(packages, stats, FakeResolver(answers))
+    # docs/ is its own environment: it gets the resolved urllib3
+    assert packages[("PyPI", "urllib3", "1.23")]["sources"] == ["docs/requirements.txt"]
+
+
+def test_the_maven_override_is_repo_wide(tmp_path):
+    pom = "<project><dependencies>{}</dependencies></project>"
+    dep = "<dependency><groupId>{}</groupId><artifactId>{}</artifactId><version>{}</version></dependency>"
+    write(tmp_path, "pom.xml", pom.format(dep.format("org.yaml", "snakeyaml", "2.0")))
+    write(tmp_path, "mod/pom.xml", pom.format(dep.format("org.example", "lib", "1.0")))
+    packages, stats = osv.collect_packages(tmp_path)
+    answers = {
+        ("Maven", "org.example:lib", "1.0"): Resolution(
+            "ok", [("org.yaml:snakeyaml", "2.2", "DIRECT")]
+        )
+    }
+    block = osv.resolve_transitive(packages, stats, FakeResolver(answers))
+    assert ("Maven", "org.yaml:snakeyaml", "2.2") not in packages
+    assert block["overridden_by_declaration"] == 1

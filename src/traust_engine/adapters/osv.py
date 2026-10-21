@@ -411,11 +411,18 @@ def resolve_transitive(packages: dict[tuple[str, str, str], dict], stats: dict, 
 
     direct: dict[str, list] = stats.get("unresolved_direct") or {}
     unversioned: dict[str, list] = stats.get("unversioned_direct") or {}
-    # pip installs one version per package and Maven takes the version the
-    # project declares or manages: a declared name overrides any resolved
-    # version of it. npm and Cargo may install several versions side by side.
-    one_version = {"PyPI", "Maven"}
-    declared_names = {(e, n.lower()) for (e, n, _v) in packages if e in one_version}
+    # A declared name overrides a resolved version of it where only one
+    # version can be installed. pip installs one per environment, and each
+    # requirements file is its own environment, so the rule is per file.
+    # Maven takes the version the project declares or manages, and parent
+    # poms manage it for every module, so the rule is repo-wide. npm and
+    # Cargo may install several versions side by side: no rule.
+    maven_declared = {n.lower() for (e, n, _v), ent in packages.items() if e == "Maven"}
+    pypi_declared: dict[str, set[str]] = {}
+    for (e, n, _v), ent in packages.items():
+        if e == "PyPI":
+            for src in ent["sources"]:
+                pypi_declared.setdefault(src, set()).add(re.sub(r"[-_.]+", "-", n).lower())
     block: dict[str, Any] = {
         "source": "deps.dev",
         "base_url": resolver.base_url,
@@ -456,8 +463,19 @@ def resolve_transitive(packages: dict[tuple[str, str, str], dict], stats: dict, 
             continue
         via = f"{key[1]}@{key[2]}"
         srcs = [m for m, keys in direct.items() if key in keys]
+        d = defaults.get((key[0], key[1]))
+        if d is not None and d.ok and d.nodes[0][1] == key[2]:  # resolved at the default
+            srcs += [
+                m for m, names in unversioned.items() if (key[0], key[1]) in names and m not in srcs
+            ]
         for name, version, _relation in res.nodes:
-            if key[0] in one_version and (key[0], name.lower()) in declared_names:
+            node_srcs = srcs
+            if key[0] == "Maven" and name.lower() in maven_declared:
+                node_srcs = []
+            elif key[0] == "PyPI":
+                norm = re.sub(r"[-_.]+", "-", name).lower()
+                node_srcs = [m for m in srcs if norm not in pypi_declared.get(m, set())]
+            if not node_srcs:
                 block["overridden_by_declaration"] = block.get("overridden_by_declaration", 0) + 1
                 continue
             entry = packages.get((key[0], name, version))
@@ -470,7 +488,7 @@ def resolve_transitive(packages: dict[tuple[str, str, str], dict], stats: dict, 
                 added += 1
             if entry["version_basis"] != "resolved":
                 continue  # declared or locked: the declaration already covers it
-            for src in srcs:
+            for src in node_srcs:
                 if src not in entry["sources"]:
                     entry["sources"].append(src)
             if via not in entry["resolved_via"]:
