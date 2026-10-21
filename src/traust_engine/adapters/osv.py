@@ -30,6 +30,7 @@ not install either (owner decision 2026-10-20). The engine reads no
 configuration: the caller chooses the path.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -303,6 +304,67 @@ def discover_manifests(repo: Path) -> list[tuple[str, str, Any]]:
     return found
 
 
+_POM_DEP = re.compile(r"<dependency>(.*?)</dependency>", re.S)
+
+
+def _tag(block: str, tag: str) -> str:
+    m = re.search(rf"<{tag}>\s*([^<]*?)\s*</{tag}>", block)
+    return m.group(1) if m else ""
+
+
+def declared_scopes(filename: str, text: str) -> dict[str, str]:
+    """Names a manifest declares ONLY as test or dev dependencies.
+
+    ``test``: Maven ``<scope>test</scope>`` (in ``<dependencies>`` or
+    ``<dependencyManagement>``). ``dev``: npm ``devDependencies``, Cargo
+    ``[dev-dependencies]``, Poetry dev-dependencies and non-main groups.
+    A name also declared for runtime is not listed. The shared parsers merge
+    these sections, so scope is read here (owner decision 2026-10-21: tag
+    test and dev dependencies, never skip them).
+    """
+    runtime: set[str] = set()
+    scoped: dict[str, str] = {}
+    try:
+        if filename == "package.json":
+            doc = json.loads(text)
+            runtime = {k.lower() for k in (doc.get("dependencies") or {})}
+            scoped = {k.lower(): "dev" for k in (doc.get("devDependencies") or {})}
+        elif filename == "pom.xml":
+            for block in _POM_DEP.findall(text):
+                name = f"{_tag(block, 'groupId')}:{_tag(block, 'artifactId')}".lower()
+                if _tag(block, "scope") == "test":
+                    scoped[name] = "test"
+                else:
+                    runtime.add(name)
+        elif filename in ("Cargo.toml", "pyproject.toml"):
+            import tomllib
+
+            doc = tomllib.loads(text)
+            if filename == "Cargo.toml":
+                runtime = {k.lower() for k in doc.get("dependencies") or {}}
+                scoped = {k.lower(): "dev" for k in doc.get("dev-dependencies") or {}}
+            else:
+                poetry = (doc.get("tool") or {}).get("poetry") or {}
+                runtime = {
+                    re.sub(r"[-_.]+", "-", k).lower() for k in poetry.get("dependencies") or {}
+                }
+                dev = dict(poetry.get("dev-dependencies") or {})
+                for gname, group in (poetry.get("group") or {}).items():
+                    if gname != "main":
+                        dev.update((group or {}).get("dependencies") or {})
+                scoped = {re.sub(r"[-_.]+", "-", k).lower(): "dev" for k in dev}
+    except (ValueError, TypeError, AttributeError):
+        return {}
+    return {k: v for k, v in scoped.items() if k not in runtime}
+
+
+def _scope_tag(scopes: set[str] | None) -> str | None:
+    """``test`` / ``dev`` when every path to a package is test or dev, else None."""
+    if not scopes or "runtime" in scopes:
+        return None
+    return "test" if scopes == {"test"} else "dev"
+
+
 def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict]:
     """Every (OSV ecosystem, package, version) declared in the tree.
 
@@ -330,9 +392,13 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
         # version, for resolve_transitive
         "unresolved_direct": {},
         "unversioned_direct": {},
+        # (manifest, (eco, name, version)) -> runtime / test / dev, so a
+        # resolved tree inherits its direct dependency's scope
+        "direct_scope": {},
+        "unversioned_scope": {},
     }
 
-    def add(eco: str, name: str, version: str, src: str, basis: str):
+    def add(eco: str, name: str, version: str, src: str, basis: str, scope: str = "runtime"):
         version = version.strip()
         if not name or not version or not _EXACT_VERSION.match(version) or "${" in version:
             stats["unpinned_skipped"] += 1
@@ -346,6 +412,8 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
             entry["version_basis"] = "locked"
         elif entry["version_basis"] == "resolved":
             entry["version_basis"] = basis  # declared outranks resolved
+        entry.setdefault("scopes", set()).add(scope)
+        stats["direct_scope"][(src, (eco, name, version))] = scope
         return (eco, name, version)
 
     for rel, eco, parser in manifests:
@@ -381,9 +449,21 @@ def collect_packages(repo: Path) -> tuple[dict[tuple[str, str, str], dict], dict
         exact = name in LOCKFILES or pinned_requirements or eco == "actions"
         basis = "locked" if exact else "manifest-floor"
         whole_tree = exact and not (pinned_requirements and not _COMPILED_REQUIREMENTS.search(text))
+        scopes = declared_scopes(name, text)
+
+        def scope_of(dep_name: str, scopes=scopes, osv_eco=osv_eco) -> str:
+            key = (
+                dep_name.lower() if osv_eco != "PyPI" else re.sub(r"[-_.]+", "-", dep_name).lower()
+            )
+            return scopes.get(key, "runtime")
+
         added = [
-            add(osv_eco, dep_name, version or "", rel, basis) for dep_name, version, _i in deps
+            add(osv_eco, dep_name, version or "", rel, basis, scope_of(dep_name))
+            for dep_name, version, _i in deps
         ]
+        for (dep_name, _v, _i), k in zip(deps, added, strict=True):
+            if k is None and dep_name:
+                stats["unversioned_scope"][(rel, osv_eco, dep_name)] = scope_of(dep_name)
         bare = _bare_requirements(text) if requirements else []
         stats["unpinned_skipped"] += len(bare)
         if not whole_tree:
@@ -451,6 +531,9 @@ def resolve_transitive(packages: dict[tuple[str, str, str], dict], stats: dict, 
             for m, names in unversioned.items():
                 if (eco, name) in names and m not in entry["sources"]:
                     entry["sources"].append(m)
+                    scope = stats.get("unversioned_scope", {}).get((m, eco, name), "runtime")
+                    entry.setdefault("scopes", set()).add(scope)
+                    stats.setdefault("direct_scope", {})[(m, (eco, name, version))] = scope
         todo = sorted(
             set(wanted) | {(e, n, r.nodes[0][1]) for (e, n), r in defaults.items() if r.ok}
         )
@@ -491,6 +574,8 @@ def resolve_transitive(packages: dict[tuple[str, str, str], dict], stats: dict, 
             for src in node_srcs:
                 if src not in entry["sources"]:
                     entry["sources"].append(src)
+                scope = (stats.get("direct_scope") or {}).get((src, key), "runtime")
+                entry.setdefault("scopes", set()).add(scope)
             if via not in entry["resolved_via"]:
                 entry["resolved_via"].append(via)
     still, resolved = [], []
@@ -627,6 +712,11 @@ def lookup(
                     **(
                         {"resolved_via": list(entry["resolved_via"])}
                         if entry.get("resolved_via")
+                        else {}
+                    ),
+                    **(
+                        {"dependency_scope": tag}
+                        if (tag := _scope_tag(entry.get("scopes")))
                         else {}
                     ),
                     "details_fetched": bool(vuln),
