@@ -2,6 +2,23 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.37.1]
+
+- **Fixed: `go.mod` `replace` directives were ignored** by the dependency
+  pre-scan; the shared `parse_gomod` doesn't read them.
+  - **A require replaced with a directory in the checkout**
+    (`go.etcd.io/etcd/server/v3 => ./server`) is the project's own
+    module. It is no longer looked up as a published package. On etcd
+    that removes 3 false positives and 45 such requires.
+  - **A require replaced with another module or version** queries what
+    actually builds: `github.com/old/lib => github.com/fork/lib v1.2.5`,
+    or ARO-RP's 22 version pins such as
+    `k8s.io/api => k8s.io/api v0.29.15`.
+  - Version-specific replaces apply only to the version they name. The
+    module's own path is never a dependency.
+  - Provenance counts both: `go_requires_replaced_locally` and
+    `go_requires_replaced_by_module`.
+
 ## [0.37.0]
 
 - **Test and dev dependencies are tagged, never skipped** (owner decision
