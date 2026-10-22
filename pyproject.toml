@@ -36,7 +36,7 @@ s3 = ["fsspec>=2024.2", "s3fs>=2024.2"]
 gcs = ["fsspec>=2024.2", "gcsfs>=2024.2"]
 
 [dependency-groups]
-dev = ["fsspec>=2024.2", "pytest>=9.1.1", "ruff>=0.6", "vulture>=2.16"]
+dev = ["fsspec>=2024.2", "pytest>=9.1.1", "ruff>=0.6", "traust-ledger[db]", "vulture>=2.16"]
 
 [tool.uv.sources]
 traust-contracts = { git = "https://github.com/traust-security/traust-contracts.git", rev = "84bd8e4f6cda7431fb4a1321b1d10715f2220860" }

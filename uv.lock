@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -2130,6 +2130,7 @@ dev = [
     { name = "fsspec" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "traust-ledger", extra = ["db"] },
     { name = "vulture" },
 ]
 
@@ -2161,6 +2162,7 @@ dev = [
     { name = "fsspec", specifier = ">=2024.2" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.6" },
+    { name = "traust-ledger", extras = ["db"], git = "https://github.com/traust-security/traust-ledger.git?rev=c3e6d2ebb1c3105e3ddf9c262198a9514d94291e" },
     { name = "vulture", specifier = ">=2.16" },
 ]
 
