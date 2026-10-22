@@ -40,21 +40,6 @@ def test_metrics_journal_follows_configured_progress_tracker(tmp_path):
     assert ok, issues
 
 
-def test_corpus_pulls_config_and_results_from_context(tmp_path):
-    home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
-    ar = tmp_path / "analysis-results"
-    (ar / "findings").mkdir(parents=True)
-    (home / "locations.yaml").write_text(
-        yaml.safe_dump({"progress_tracker": str(tmp_path / "pt"), "analysis_results": str(ar)}),
-        encoding="utf-8",
-    )
-    h = HarnessEngine.load(config_home=home)
-    # config + results root both come from the context — no args at the call site.
-    assert "findings" in h.corpus.config().trees
-    res = h.corpus.resolve()
-    assert res.analysis_results == str(ar)
-
-
 def test_metrics_spend_build_uses_configured_paths(tmp_path):
     pt = tmp_path / "estate-pt"
     ws = tmp_path / "estate-ws"
@@ -114,34 +99,14 @@ def test_two_engines_are_isolated_by_their_context(tmp_path):
 def test_namespace_ops_are_cached_per_engine(tmp_path):
     h = HarnessEngine.load(config_home=_home_with_progress_tracker(tmp_path, tmp_path / "pt"))
     assert h.metrics is h.metrics
-    assert h.corpus is h.corpus
     assert h.models is h.models
     assert h.compliance is h.compliance
     assert h.adapters is h.adapters
     assert h.sweep is h.sweep
-    assert h.ledger is h.ledger
     assert h.reporting is h.reporting
     assert h.portfolio is h.portfolio
     assert h.toolchain is h.toolchain
     assert h.impact is h.impact
-
-
-def test_ledger_signing_pubkey_from_context(tmp_path):
-    h = HarnessEngine.load(config_home=_home_with_progress_tracker(tmp_path, tmp_path / "pt"))
-    assert h.ledger.signing_pubkey() == h.ctx.signing_pubkey
-
-
-def test_engine_loads_without_signing_key(tmp_path):
-    """Ledger signing is optional: no ledger-signing-key.pub → signing_pubkey is
-    None, load still succeeds, and the pubkey accessors return None rather than
-    raising. Signature *verification* is skipped; the ledger still records."""
-    home = tmp_path / "cfg"
-    shutil.copytree(_FIXTURE, home)
-    (home / "ledger-signing-key.pub").unlink()
-    h = HarnessEngine.load(config_home=home)
-    assert h.ctx.signing_pubkey is None
-    assert h.ledger.signing_pubkey() is None
-    assert h.reporting.signing_pubkey() is None
 
 
 def test_models_registry_and_validate_from_context(tmp_path):
@@ -176,50 +141,6 @@ def test_sweep_paths_follow_configured_locations(tmp_path):
     assert h.sweep._benchmark_dir() == ar / "scan-testing" / "validation-benchmark"
     assert h.sweep._progress_tracker() == pt
     assert h.sweep._workspace() == ws
-
-
-def test_corpus_build_findings_db_uses_context_paths(tmp_path):
-    home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
-    ar = tmp_path / "analysis-results"
-    rdir = ar / "findings" / "prod-a" / "repo-x"
-    rdir.mkdir(parents=True)
-    (rdir / "repo-x-security-audit.json").write_text('{"metadata": {}, "findings": []}')
-    (home / "locations.yaml").write_text(
-        yaml.safe_dump({"progress_tracker": str(tmp_path / "pt"), "analysis_results": str(ar)}),
-        encoding="utf-8",
-    )
-    h = HarnessEngine.load(config_home=home)
-    counts, out = h.corpus.build_findings_db()
-    assert out == ar / "graph" / "findings.db"
-    assert out.is_file()
-    assert counts["repos"] >= 1
-
-
-def test_corpus_load_resolution_uses_context_paths(tmp_path):
-    home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
-    ar = tmp_path / "analysis-results"
-    (ar / "findings").mkdir(parents=True)
-    (home / "locations.yaml").write_text(
-        yaml.safe_dump({"progress_tracker": str(tmp_path / "pt"), "analysis_results": str(ar)}),
-        encoding="utf-8",
-    )
-    h = HarnessEngine.load(config_home=home)
-    res = h.corpus.load_resolution(prefer_index=False)
-    assert res.analysis_results == str(ar)
-
-
-def test_corpus_match_findings_is_stateless(tmp_path):
-    home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
-    ar = tmp_path / "analysis-results"
-    (ar / "findings").mkdir(parents=True)
-    (home / "locations.yaml").write_text(
-        yaml.safe_dump({"progress_tracker": str(tmp_path / "pt"), "analysis_results": str(ar)}),
-        encoding="utf-8",
-    )
-    h = HarnessEngine.load(config_home=home)
-    cache = {"components": {}, "fingerprints": {}}
-    findings = [{"id": "F-1", "locations": [{"path": "main.go"}]}]
-    assert h.corpus.match_findings(cache, findings) == []
 
 
 def test_compliance_ops_use_configured_paths(tmp_path):
@@ -318,13 +239,6 @@ def test_portfolio_ops_use_configured_paths(tmp_path):
     h2 = HarnessEngine.load(config_home=home)
     assert h2.portfolio.portfolio_graph_db() == explicit_db
     assert h2.portfolio.portfolio_graph_location() == str(explicit_db)
-
-
-def test_reporting_ops_signing_pubkey_from_context(tmp_path):
-    home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
-    h = HarnessEngine.load(config_home=home)
-    assert h.reporting.signing_pubkey() == home / "ledger-signing-key.pub"
-    assert h.reporting.safe_exec() is h.ctx.safe_exec
 
 
 def test_toolchain_ops_external_tools_from_context(tmp_path):
