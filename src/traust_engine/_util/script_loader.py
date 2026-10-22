@@ -10,7 +10,6 @@ from types import ModuleType
 
 _MIGRATED: dict[str, str] = {
     "corpus": "traust_engine.corpus.resolver",
-    "finding_identity": "traust_engine._util.finding_identity",
     "metrics_ledger": "traust_engine.metrics.history",
     "fetch_feeds": "traust.cli.fetch_feeds",
     "check_drift": "traust.cli.check_drift",

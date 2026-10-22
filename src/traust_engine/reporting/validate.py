@@ -20,8 +20,6 @@ import jsonschema
 from referencing import Registry, Resource
 from traust_contracts.paths import schema_dir as _schema_dir
 
-from traust_engine._util.actor import is_actor_verified as _actor_is_verified
-
 SCHEMA_DIR = _schema_dir()
 SCHEMA_PATH = SCHEMA_DIR / "report.schema.json"
 
@@ -30,10 +28,6 @@ MANDATORY_SEVERITY_LEVELS = {"critical", "high", "medium", "low"}
 # Canonical globally-unique finding ID: {REPO_SLUG}-{SHORTSHA}-{NNN}
 CANONICAL_FINDING_ID = re.compile(r"^[A-Z][A-Z0-9_]{0,23}-[a-f0-9]{7}-\d{3}$")
 
-# The one runnable form of the identity tool. `traust_engine._util.finding_identity`
-# has not existed since the code moved into this package, and the "Fix:"
-# lines below get copy-pasted by whoever hit the error.
-_IDENTITY_CMD = "python3 -m traust_engine._util.finding_identity"
 # traust reset its version to 0.1.0 on this date (release: reset to 0.1.0,
 # 2026-09-10). Versions before and after overlap -- a pre-reset 0.186.2 and a
 # post-reset 0.18.6 compare the wrong way round -- so a version gate first
@@ -380,225 +374,6 @@ def cross_validate(report: dict, result: ValidationResult):
     _cross_validate_review_surfaces(report, result)
 
 
-from traust_engine.ledger import compute_claim_hash, compute_event_id
-
-
-def cross_validate_layer(
-    report: dict,
-    result: ValidationResult,
-    merkle_pubkey: str | None = None,
-    signing_pubkey: Path | None = None,
-):
-    """Cross-checks specific to layer.schema.json disposition ledgers."""
-    events = report.get("events", [])
-
-    # 1. event_id integrity: recomputable from canonical fields, and unique.
-    #    A mismatched hash means the event was edited after the fact or the
-    #    id was fabricated — either breaks idempotent re-ingestion.
-    seen_ids = Counter(e.get("event_id") for e in events)
-    for eid, cnt in seen_ids.items():
-        if cnt > 1:
-            result.error(f"Duplicate event_id: {eid}")
-    for i, e in enumerate(events):
-        disp = e.get("disposition") or {}
-        expected = compute_event_id(
-            (e.get("source") or {}).get("ref", ""),
-            e.get("finding_ref", ""),
-            disp.get("validity"),
-            disp.get("resolution"),
-        )
-        if e.get("event_id") != expected:
-            result.error(
-                f"events[{i}] ({e.get('finding_ref')}): event_id does not match "
-                f"sha256(source.ref|finding_ref|validity|resolution) — expected "
-                f"{expected}"
-            )
-
-    # 2. Append-only implies chronological order — and no time travel in
-    #    either direction. recorded_at is self-declared by the emitter
-    #    (--recorded-at), and adjudication is latest-wins within an
-    #    evidence class: a FUTURE-dated event would outrank every later
-    #    legitimate event forever (self-audit -015). Allow 24h of clock
-    #    skew; beyond that the timestamp is a forgery or a broken clock,
-    #    both of which must fail the gate.
-    prev_dt = None
-    horizon = datetime.now(UTC) + timedelta(hours=24)
-    for i, e in enumerate(events):
-        try:
-            dt = datetime.fromisoformat(str(e.get("recorded_at", "")))
-        except ValueError:
-            dt = None  # malformed dates are rejected by the schema
-        if dt is not None and prev_dt is not None and dt < prev_dt:
-            result.error(
-                f"events[{i}]: recorded_at is earlier than the previous event — "
-                f"the layer is append-only and must stay chronological"
-            )
-        if dt is not None and dt.tzinfo is not None and dt > horizon:
-            result.error(
-                f"events[{i}]: recorded_at '{e.get('recorded_at')}' is more "
-                f"than 24h in the future — a future-dated event would pin "
-                f"latest-wins adjudication forever"
-            )
-        if dt is not None:
-            prev_dt = dt
-
-    # 3. Human-identity rule: a human false_positive determination must be
-    #    attributable — LDAP-verified identity required. Machine events may
-    #    carry validity 'false_positive' (refutation evidence) but the build
-    #    script never lets them set validation_status.
-    for i, e in enumerate(events):
-        disp = e.get("disposition") or {}
-        actor = (e.get("source") or {}).get("actor") or {}
-        if (
-            disp.get("validity") == "false_positive"
-            and actor.get("kind") == "human"
-            and (not actor.get("identity") or not _actor_is_verified(actor))
-        ):
-            result.error(
-                f"events[{i}] ({e.get('finding_ref')}): human false_positive "
-                f"determination requires a verified identity "
-                f"(actor.identity set and identity verified)"
-            )
-
-    # 3a2. Severity overrides are HUMAN-only: a machine actor may never
-    #      carry disposition.severity (harness >= 0.128.0). Human severity
-    #      events need the same LDAP-verified attribution as human FPs,
-    #      plus a rationale — a severity change without a why is not
-    #      recordable.
-    for i, e in enumerate(events):
-        disp = e.get("disposition") or {}
-        actor = (e.get("source") or {}).get("actor") or {}
-        if disp.get("severity"):
-            if actor.get("kind") != "human":
-                result.error(
-                    f"events[{i}] ({e.get('finding_ref')}): "
-                    f"disposition.severity is a human-only override — "
-                    f"machine actors may not set severity"
-                )
-            elif not actor.get("identity") or not _actor_is_verified(actor):
-                result.error(
-                    f"events[{i}] ({e.get('finding_ref')}): human severity "
-                    f"override requires a verified identity"
-                )
-            if not (e.get("rationale") or "").strip():
-                result.error(
-                    f"events[{i}] ({e.get('finding_ref')}): severity override requires a rationale"
-                )
-
-    # 3a3. Embargo assertions are HUMAN-only, on the same footing as
-    #      severity: whether a finding warrants embargoed handling is a
-    #      disclosure-risk judgement, never a machine verdict, and an
-    #      embargo call without a why is not recordable.
-    #
-    #      This rule existed briefly in the harness's own validate_report.py
-    #      and was lost when that module was deleted in the C8 restructure,
-    #      leaving `disposition.embargo`'s schema description asserting
-    #      validator enforcement that nothing performed. Re-landed here,
-    #      where validation now lives.
-    for i, e in enumerate(events):
-        disp = e.get("disposition") or {}
-        actor = (e.get("source") or {}).get("actor") or {}
-        if disp.get("embargo"):
-            if actor.get("kind") != "human":
-                result.error(
-                    f"events[{i}] ({e.get('finding_ref')}): "
-                    f"disposition.embargo is a human-only assertion — "
-                    f"machine actors may not set embargo"
-                )
-            elif not actor.get("identity") or not _actor_is_verified(actor):
-                result.error(
-                    f"events[{i}] ({e.get('finding_ref')}): human embargo "
-                    f"assertion requires a verified identity"
-                )
-            if not (e.get("rationale") or "").strip():
-                result.error(
-                    f"events[{i}] ({e.get('finding_ref')}): embargo assertion requires a rationale"
-                )
-
-    # 3b. occurred_at (source timestamp) should not postdate recorded_at
-    #     (ledger append time) — that means one of them is wrong.
-    for i, e in enumerate(events):
-        occ, rec = e.get("occurred_at"), e.get("recorded_at")
-        if occ and rec and str(occ) > str(rec):
-            result.warn(
-                f"events[{i}] ({e.get('finding_ref')}): occurred_at '{occ}' is "
-                f"later than recorded_at '{rec}' — a determination cannot "
-                f"happen after it was recorded"
-            )
-
-    # 5. Baseline claim-hash verification — tamper-evidence for the audit
-    #    report the layer annotates. metadata.claim_hashes pins each
-    #    baselined finding's claim fields; a mismatch means the audit file
-    #    was edited in place (only 'corrected' findings may drift, pending
-    #    an explicit --rebaseline via the harness's baseline_claims.py
-    #    (harnessing/4-triage/track-findings/scripts/)).
-    meta = report.get("metadata") or {}
-    hashes = meta.get("claim_hashes") or {}
-    if hashes:
-        audit_path = Path(result.file_path).parent / str(meta.get("audit_report", ""))
-        if not audit_path.is_file():
-            result.warn(
-                f"metadata.claim_hashes present but the audit report "
-                f"'{meta.get('audit_report')}' was not found next to the layer "
-                f"— baseline integrity could not be verified"
-            )
-        else:
-            try:
-                audit = json.loads(audit_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as e:
-                audit = None
-                result.warn(f"cannot read audit report for claim verification: {e}")
-            if audit is not None:
-                by_id = {f.get("id"): f for f in audit.get("findings", [])}
-                for fid, recorded in sorted(hashes.items()):
-                    f = by_id.get(fid)
-                    if f is None:
-                        result.error(
-                            f"claim_hashes[{fid}]: baselined finding is missing "
-                            f"from the audit report — findings must never be "
-                            f"deleted or re-id'd; retire them via the ledger"
-                        )
-                    elif compute_claim_hash(f) != recorded:
-                        if f.get("validation_status") == "corrected":
-                            result.warn(
-                                f"claim_hashes[{fid}]: claim drifted but the "
-                                f"finding is marked 'corrected' — re-baseline "
-                                f"it: baseline_claims.py record --rebaseline {fid}"
-                            )
-                        else:
-                            result.error(
-                                f"claim_hashes[{fid}]: claim hash mismatch — "
-                                f"the finding was edited in place without a "
-                                f"'corrected' revision; the audit report is "
-                                f"the immutable claim source, changes flow "
-                                f"through the ledger"
-                            )
-                unbaselined = sorted(set(by_id) - set(hashes))
-                if unbaselined:
-                    result.warn(
-                        f"{len(unbaselined)} audit finding(s) not yet baselined "
-                        f"in claim_hashes (new appends?) — run "
-                        f"baseline_claims.py record to pin them: "
-                        f"{', '.join(unbaselined[:5])}" + ("…" if len(unbaselined) > 5 else "")
-                    )
-
-    # 4. Confirmed review items must have produced an event from their source
-    event_refs = {(e.get("source") or {}).get("ref") for e in events}
-    for i, item in enumerate(report.get("needs_review", [])):
-        if item.get("status") == "confirmed" and item.get("source_ref") not in event_refs:
-            result.error(
-                f"needs_review[{i}]: status is 'confirmed' but no event "
-                f"references source_ref '{item.get('source_ref')}'"
-            )
-        if item.get("status") in ("confirmed", "rejected") and not item.get("resolution_note"):
-            result.warn(
-                f"needs_review[{i}]: {item.get('status')} without a "
-                f"resolution_note — record why and by whom"
-            )
-
-    _cross_validate_merkle(report, result, merkle_pubkey, signing_pubkey)
-
-
 def check_metadata_repository(report: dict, result: ValidationResult):
     """`metadata.repository` must be a well-formed repository URL.
 
@@ -634,7 +409,7 @@ def check_metadata_repository(report: dict, result: ValidationResult):
         result.error(
             f"metadata.repository is wrapped in markdown autolink brackets "
             f"({s[:60]}) — the brackets are hashed into the fingerprint. "
-            f"Strip them and re-run {_IDENTITY_CMD} fingerprint <report.json> --write."
+            "Strip them."
         )
         return
     if not _REPO_URL_RE.match(s):
@@ -768,37 +543,6 @@ def _cross_validate_scan_review_surfaces(
                     f"review_surface_coverage.{surface}: finding_ids names {fid!r}, "
                     f"which is not a finding of this {kind} report"
                 )
-
-
-def _default_signing_pubkey(pubkey: Path | None = None) -> str | None:
-    """Return ``str(pubkey)`` when injected by the engine facade, else None."""
-    return str(pubkey) if pubkey is not None else None
-
-
-def _cross_validate_merkle(
-    report: dict,
-    result: ValidationResult,
-    pubkey_path: str | None = None,
-    signing_pubkey: Path | None = None,
-) -> None:
-    from traust_engine.ledger import (
-        Severity,
-        verify_merkle_integrity,
-        verify_merkle_signature,
-    )
-
-    for finding in verify_merkle_integrity(report):
-        if finding.severity == Severity.ERROR:
-            result.error(finding.message)
-        else:
-            result.warn(finding.message)
-
-    pubkey = pubkey_path or _default_signing_pubkey(signing_pubkey)
-    for finding in verify_merkle_signature(report, pubkey):
-        if finding.severity == Severity.ERROR:
-            result.error(finding.message)
-        else:
-            result.warn(finding.message)
 
 
 def _cross_validate_dispositions(report: dict, result: ValidationResult):
@@ -1540,81 +1284,7 @@ def _repository_parses(url: str) -> bool:
     )
 
 
-def check_finding_identity(report: dict, result: ValidationResult):
-    """Every finding carries the deterministic cross-scan fingerprint.
-
-    `fingerprint` is schema-declared and pattern-constrained but OPTIONAL,
-    so a report that never ran the stamp step validates clean while being
-    invisible to every cross-scan consumer: continuation matching,
-    disposition carry-forward, and the downstream platform's finding
-    identity all key on it.
-
-    Two distinct failures, two severities:
-
-    * ABSENT -> error (P6 flip, 2026-08-13 — corpus is 100% stamped).
-    * MISMATCH -> error. Recompute-and-compare against traust-ledger.
-    """
-    findings = report.get("findings") or []
-    if not findings:
-        return
-
-    missing = [f.get("id", "?") for f in findings if not f.get("fingerprint")]
-    if missing:
-        shown = ", ".join(missing[:5]) + ("..." if len(missing) > 5 else "")
-        result.error(
-            f"{len(missing)} of {len(findings)} finding(s) have no cross-scan "
-            f"`fingerprint` ({shown}) — cross-scan continuation, disposition "
-            f"carry-forward and the downstream platform's identity all key on "
-            f"it. Fix: {_IDENTITY_CMD} "
-            f"fingerprint <report.json> --write"
-        )
-
-    try:
-        from traust_engine.ledger import fingerprint as _fingerprint
-    except ImportError:
-        result.warn(
-            "cannot import traust_engine.ledger — `fingerprint` values were "
-            "checked for presence but NOT verified against the recipe"
-        )
-        return
-
-    repo = (report.get("metadata") or {}).get("repository")
-    wrong = []
-    for f in findings:
-        stored = f.get("fingerprint")
-        if not stored:
-            continue
-        try:
-            expected = _fingerprint(f, repo)
-        except Exception as e:
-            result.warn(f"finding {f.get('id', '?')}: cannot recompute `fingerprint` ({e})")
-            continue
-        if stored != expected:
-            wrong.append((f.get("id", "?"), stored, expected))
-
-    if wrong:
-        shown = ", ".join(fid for fid, _, _ in wrong[:5]) + ("..." if len(wrong) > 5 else "")
-        fid, got, exp = wrong[0]
-        result.error(
-            f"{len(wrong)} of {len(findings)} finding(s) carry a `fingerprint` "
-            f"that the recipe does not produce ({shown}) — the stamp was not "
-            f"written by the ledger identity recipe, so it is not a cross-scan "
-            f"identity and must not be trusted as one. First mismatch {fid}: "
-            f"stored {got[:16]}…, recomputed {exp[:16]}…. Fix: "
-            f"{_IDENTITY_CMD} fingerprint <report.json> --write "
-            f"(this CHANGES those findings' identity — check disposition "
-            f"continuity before re-stamping)"
-        )
-
-
 def strict_checks(report: dict, result: ValidationResult):
-    # No identity check here: check_finding_identity already ERRORS on an
-    # absent or non-reproducing stamp on the DEFAULT path (P6 flip,
-    # 2026-08-13, once the corpus reached 100% stamped). A strict re-scan
-    # would report the same defect twice, and the comment that used to sit
-    # here — "advisory by default, an error under --strict" — outlived the
-    # behaviour it described.
-
     # write-time secret gate: evidence fields may quote target code, but an
     # UNREDACTED live secret in a report is an incident, not evidence — strict mode
     # makes it a validation ERROR. Redact via traust_engine._util.redact
@@ -1834,8 +1504,6 @@ def validate_report(
     schema: dict,
     strict: bool = False,
     registry: Registry | None = None,
-    merkle_pubkey: str | None = None,
-    signing_pubkey: Path | None = None,
 ) -> ValidationResult:
     result = ValidationResult(file_path=file_path)
 
@@ -1861,8 +1529,6 @@ def validate_report(
         sid = schema.get("$id", "")
         if "verification" in sid:
             cross_validate_verification(report, result)
-        elif "layer" in sid:
-            cross_validate_layer(report, result, merkle_pubkey, signing_pubkey)
         elif "remediation" in sid:
             cross_validate_remediation(report, result)
         elif "triage" in sid:
@@ -1923,7 +1589,6 @@ def validate_report(
     # is not report-shaped they would raise and abort a whole directory
     # sweep; its schema errors already say what is wrong.
     if not any(k in sid for k in _non_audit) and _report_shaped(report):
-        check_finding_identity(report, result)
         check_metadata_repository(report, result)
         if strict:
             strict_checks(report, result)

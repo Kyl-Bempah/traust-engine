@@ -12,7 +12,7 @@ it needs, with no dependency on the app:
     ok, issues = h.metrics.verify()
 
 Namespaces mirror the engine's submodules; `.metrics` is the first migrated.
-Others (`.corpus`, `.models`, `.compliance`, `.sweep`, …) follow the same shape.
+Others (`.models`, `.compliance`, `.sweep`, …) follow the same shape.
 """
 
 from __future__ import annotations
@@ -24,9 +24,7 @@ from traust_contracts import HarnessContext, load_context
 
 from traust_engine.adapters.ops import AdaptersOps
 from traust_engine.compliance.ops import ComplianceOps
-from traust_engine.corpus.ops import CorpusOps
 from traust_engine.impact.ops import ImpactOps
-from traust_engine.ledger.ops import LedgerOps
 from traust_engine.metrics.ops import MetricsOps
 from traust_engine.portfolio.ops import PortfolioOps
 from traust_engine.registry.ops import ModelsOps
@@ -53,10 +51,6 @@ class HarnessEngine:
         return MetricsOps(self._ctx)
 
     @cached_property
-    def corpus(self) -> CorpusOps:
-        return CorpusOps(self._ctx)
-
-    @cached_property
     def models(self) -> ModelsOps:
         return ModelsOps(self._ctx)
 
@@ -71,10 +65,6 @@ class HarnessEngine:
     @cached_property
     def sweep(self) -> SweepOps:
         return SweepOps(self._ctx)
-
-    @cached_property
-    def ledger(self) -> LedgerOps:
-        return LedgerOps(self._ctx)
 
     @cached_property
     def reporting(self) -> ReportingOps:

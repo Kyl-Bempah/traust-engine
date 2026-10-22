@@ -1,7 +1,7 @@
 """``HarnessEngine.reporting`` — validate, render, lint, SARIF, bound to context.
 
-Signing pubkey and safe_exec come from the injected ``HarnessContext``; callers
-use ``h.reporting.validate(...)`` instead of self-fetching config.
+safe_exec comes from the injected ``HarnessContext``; callers use
+``h.reporting.validate(...)`` instead of self-fetching config.
 """
 
 from __future__ import annotations
@@ -14,9 +14,6 @@ from traust_engine.reporting import lint, render, sarif, validate
 
 
 class ReportingOps(ContextOps):
-    def signing_pubkey(self) -> Path | None:
-        return self._ctx.signing_pubkey
-
     def safe_exec(self):
         return self._ctx.safe_exec
 
@@ -26,15 +23,7 @@ class ReportingOps(ContextOps):
         *,
         strict: bool = False,
         schema: Path | dict | None = None,
-        signing_pubkey: str | Path | None = None,
     ) -> list[validate.ValidationResult]:
-        pubkey = signing_pubkey
-        if pubkey is None:
-            key = self.signing_pubkey()
-            pubkey = str(key) if key is not None else None
-        elif isinstance(pubkey, Path):
-            pubkey = str(pubkey)
-
         explicit_schema: dict | None = None
         if isinstance(schema, dict):
             explicit_schema = schema
@@ -64,7 +53,6 @@ class ReportingOps(ContextOps):
                     file_schema,
                     strict=strict,
                     registry=registry,
-                    merkle_pubkey=pubkey,
                 )
             )
         return results

@@ -2,6 +2,30 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.38.0]
+
+- **Breaking: traust-core is the hub.** traust-engine depends on traust-core
+  only; traust-contracts (`7e06d1d`) and traust-ledger (`7f34ff6`, the
+  library) come through core's pins. The direct dependencies, the
+  `ledger-migration` extra and the dev `traust-ledger[db]` are gone.
+- **Retired: code built on APIs the ledger library cut and contracts removed.**
+  The ledger and finding rules now live in traust-core's services; each skill
+  port moves its callers.
+  - `ledger/` (`HarnessEngine.ledger`), `_util/actor.py`,
+    `_util/layer_paths.py`: the ledger is core's `LedgerService`.
+  - `_util/finding_identity.py`, `corpus/disposition.py`,
+    `corpus/findings_db.py`, `corpus/precedent.py`, `corpus/ops.py`
+    (`HarnessEngine.corpus`): identity, disposition, finding reads and
+    precedents are core's `IdentityPolicy`, `Disposition`, `FindingService`
+    and `FindingPrecedents`.
+  - `corpus/migrate.py`, `corpus/migration_*.py`, `corpus/store_ingest.py`:
+    built on the removed contracts storage API; existing data moves through
+    core's migration runner. `scripts/migrate.py`, the migration profiles, the
+    `db-*` / `migrate-*` make targets and the `postgres` extra go with them.
+  - `reporting/validate.py`: layer validation (claim hashes, Merkle,
+    signatures) and the fingerprint recompute; `validate_report` and
+    `ReportingOps.validate` lose `merkle_pubkey` / `signing_pubkey`.
+
 ## [0.37.1]
 
 - **Fixed: `go.mod` `replace` directives were ignored** by the dependency

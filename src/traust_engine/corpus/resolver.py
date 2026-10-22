@@ -149,10 +149,8 @@ def _skip_dir(name: str) -> bool:
 
 
 def _default_corpus() -> CorpusConfig:
-    """Removed — use HarnessEngine.corpus.config() at CLI entry points."""
-    raise DeploymentConfigMissing(
-        "corpus config required — pass config_path or load via HarnessEngine.corpus.config()"
-    )
+    """Removed — pass the corpus config explicitly."""
+    raise DeploymentConfigMissing("corpus config required — pass config_path or cfg")
 
 
 def load_config(
@@ -162,7 +160,7 @@ def load_config(
 ) -> CorpusConfig:
     """The corpus config, typed and validated (ownership tags + required
     fields enforced by the model). An explicit ``config_path`` loads that file;
-    ``cfg`` is passed through when the caller already holds it (e.g. CorpusOps);
+    ``cfg`` is passed through when the caller already holds it;
     otherwise it comes from the injected config context."""
     if cfg is not None:
         return cfg

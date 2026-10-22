@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import sys
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -207,81 +205,12 @@ def test_open_backend_names_the_extra_when_fsspec_is_missing(monkeypatch):
         open_backend("s3://bucket/results")
 
 
-def test_corpus_report_store_follows_locations(tmp_path, s3_as_memory):
-    import yaml
-
-    from traust_engine import HarnessEngine
-
-    home = tmp_path / "cfg"
-    shutil.copytree(Path(__file__).parent / "fixtures" / "config", home)
-    (home / "locations.yaml").write_text(
-        yaml.safe_dump({"analysis_results": s3_as_memory}), encoding="utf-8"
-    )
-    engine = HarnessEngine.load(config_home=home)
-    engine.corpus.report_store().put(b"{}", "r.json")
-    assert FsspecBackend(s3_as_memory).exists("r.json")
-    assert isinstance(engine.corpus.report_store(results_root=tmp_path).backend, LocalBackend)
-
-
 # --- enumeration ------------------------------------------------------------
-
-
-def _build_db(root, cfg):
-    """findings.db IS the index — build it the way the corpus does."""
-    from traust_engine.corpus import findings_db as bdb
-
-    out = root / "graph" / "findings.db"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    bdb.build(root, out, cfg=cfg)
-    return out
-
-
-def test_load_resolution_from_the_db_matches_the_walk_field_for_field(tmp_path):
-    """The acceptance bar for step 2a. `repos` carries every ReportRecord field, so a
-    consumer reading it must see exactly what walking the tree would have given —
-    otherwise switching a consumer to the db is a behaviour change wearing a
-    refactor's clothes, and it shows up as a missing artifact rather than an error.
-    """
-    root, cfg = _tree(tmp_path)
-    walked = resolve(root, cfg)
-    _build_db(root, cfg)
-    indexed = load_resolution(root, cfg)
-
-    def key(r):
-        return (r.tree, r.product or "", r.repo_dir, r.base)
-
-    assert [asdict(r) for r in sorted(walked.records, key=key)] == [
-        asdict(r) for r in sorted(indexed.records, key=key)
-    ]
-    assert walked.trees == indexed.trees
 
 
 def test_load_resolution_falls_back_to_the_walk_when_there_is_no_db(tmp_path):
     root, cfg = _tree(tmp_path)
     assert len(load_resolution(root, cfg).records) == len(resolve(root, cfg).records)
-
-
-def test_load_resolution_honours_the_trees_filter(tmp_path):
-    root, cfg = _tree(tmp_path)
-    _build_db(root, cfg)
-    tree = sorted({r.tree for r in resolve(root, cfg).records})[0]
-    got = load_resolution(root, cfg, trees=[tree])
-    assert {r.tree for r in got.records} == {tree}
-    assert set(got.trees) == {tree}
-
-
-def test_load_resolution_repo_urls_are_opt_in_both_ways(tmp_path):
-    """repos always stores repo_url; a caller that did not ask must not see it, or
-    db-backed records diverge from walked ones on a field consumers compare."""
-    root, cfg = _tree(tmp_path)
-    _build_db(root, cfg)
-    assert all(r.repo_url is None for r in load_resolution(root, cfg).records)
-    walked = {(r.tree, r.base): r.repo_url for r in resolve(root, cfg, with_repo_urls=True).records}
-    indexed = {
-        (r.tree, r.base): r.repo_url
-        for r in load_resolution(root, cfg, with_repo_urls=True).records
-    }
-    assert walked == indexed
 
 
 def test_a_db_missing_the_record_columns_is_ignored_rather_than_trusted(tmp_path):
