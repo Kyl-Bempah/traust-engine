@@ -25,9 +25,9 @@ from traust_core.v1.models.operations import (
 )
 from traust_core.v1.models.values import HttpsRepoUrl
 
-from traust_engine.controller import ENGINE, Controller
-from traust_engine.loop import EngineLoop
-from traust_engine.pack import Pack
+from traust_engine.ops.controller import ENGINE, Controller
+from traust_engine.ops.loop import EngineLoop
+from traust_engine.ops.pack import Pack
 
 PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
 T0 = datetime(2026, 10, 1, 6, tzinfo=UTC)
@@ -86,9 +86,10 @@ def _drain(services: Services, result: JobResult = SUCCEEDED) -> list[RunOrder]:
 
 
 def _pack(tmp_path: Path, **changes: dict[str, Any]) -> Pack:
+    """The fixture pack with some assets' top-level keys replaced."""
     raw = yaml.safe_load(PACK.read_text())
     for asset, fields in changes.items():
-        raw["assets"].setdefault(asset, {}).update(fields)
+        raw["assets"][asset] |= fields
     path = tmp_path / "assets.yaml"
     path.write_text(yaml.safe_dump(raw))
     return Pack.load(path)
@@ -261,14 +262,15 @@ def test_unknown_cost_is_never_withheld(tmp_path: Path) -> None:
     services.ops.plan(
         OrderRequest(asset="diff_scan", priority=1, repository_id=repo, lane="diff-scan"), ENGINE
     )
-    pack = _pack(tmp_path, diff_scan={"estimate_usd": None})
+    pack = _pack(tmp_path, diff_scan={"admission": {}})
     assert EngineLoop(services, clock, pack).run_once().admission.withheld == 0
 
 
 def test_a_human_gated_asset_waits_for_approval(tmp_path: Path) -> None:
     clock = Clock()
     services = _context(tmp_path, clock).services()
-    report = EngineLoop(services, clock, _pack(tmp_path, feeds_cache={"approval": True})).run_once()
+    pack = _pack(tmp_path, feeds_cache={"admission": {"approval": "security-operators"}})
+    report = EngineLoop(services, clock, pack).run_once()
     assert report.admission.awaiting_approval == 1
     (held,) = _orders(services, OrderState.AWAITING_APPROVAL)
     assert held.asset == "feeds_cache"
@@ -278,7 +280,7 @@ def test_pacing_spreads_an_asset_across_ticks(tmp_path: Path) -> None:
     clock = Clock()
     services = _context(tmp_path, clock).services()
     _repositories(services, 3)
-    pack = _pack(tmp_path, repo_state={"quota": None, "per_tick": 1})
+    pack = _pack(tmp_path, repo_state={"admission": {"pacing": {"per_tick": 1}}})
     loop = EngineLoop(services, clock, pack)
     assert loop.run_once().admission.deferred == 2
     assert loop.run_once().admission.deferred == 1
@@ -299,3 +301,29 @@ def test_a_router_needs_its_state_reader(tmp_path: Path) -> None:
     services = _context(tmp_path, clock).services()
     with pytest.raises(ValueError):
         Controller(Pack.load(PACK), services.ops, clock, router=LaneRouter())
+
+
+def test_freshness_fail_reports_subjects_never_or_long_ago_materialized(tmp_path: Path) -> None:
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _repositories(services, 2)
+    pack = _pack(tmp_path, repo_state={"freshness": {"fail": "72h"}, "admission": {}})
+    loop = EngineLoop(services, clock, pack)
+    assert loop.run_once().tick.overdue == {"repo_state": 2}
+    _drain(services)
+    assert loop.run_once().tick.overdue == {}
+    clock.at += timedelta(hours=73)
+    assert loop.run_once().tick.overdue == {"repo_state": 2}
+
+
+def test_assets_sharing_a_quota_key_share_one_bucket(tmp_path: Path) -> None:
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _repositories(services, 2)
+    forge = {"admission": {"quota": {"key": "forge:{host}", "per_hour": 2}}}
+    pack = _pack(
+        tmp_path,
+        dependency_graph={"deps": [], "trigger": {"every": "24h"}, **forge},
+    )
+    report = EngineLoop(services, clock, pack).run_once()
+    assert (report.admission.admitted, report.admission.deferred) == (3, 2)  # feeds + 2 forge calls

@@ -14,9 +14,9 @@ from traust_core.v1.models.inventory import RepositoryFilter
 from traust_core.v1.providers.clock import Clock
 from traust_core.v1.services.operations import Router
 
-from traust_engine.admission import Admission, AdmissionReport
-from traust_engine.controller import Controller, TickReport
-from traust_engine.pack import Pack
+from traust_engine.ops.admission import Admission, AdmissionReport
+from traust_engine.ops.controller import Controller, TickReport
+from traust_engine.ops.pack import Pack
 
 S = TypeVar("S")
 

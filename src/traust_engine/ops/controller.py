@@ -22,7 +22,7 @@ from traust_core.v1.models.vocabulary import ActorKind
 from traust_core.v1.providers.clock import Clock
 from traust_core.v1.services.operations import OpsService, Router
 
-from traust_engine.pack import Pack
+from traust_engine.ops.pack import Pack
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ class TickReport(Model):
     routed: int = 0
     unrouted: int = 0
     stale: dict[AssetName, int] = pydantic.Field(default_factory=dict)
+    overdue: dict[AssetName, int] = pydantic.Field(default_factory=dict)
 
 
 class Controller(Generic[S]):
@@ -65,11 +66,12 @@ class Controller(Generic[S]):
         planned, stale = 0, {}
         for name in self._pack.topo_order():
             spec = self._pack.assets[name]
-            if spec.every is None:
+            every = spec.trigger.every
+            if every is None:
                 continue
             subjects: Collection[UUID | None] = repositories if spec.partitions else (None,)
             busy = self._ops.subjects(name, OPEN_ORDER_STATES) | self._ops.subjects(
-                name, ATTEMPTED, now - spec.every
+                name, ATTEMPTED, now - every
             )
             fresh = {dep: self._fresh(dep, now) for dep in spec.deps}
             for subject in subjects:
@@ -84,15 +86,31 @@ class Controller(Generic[S]):
                 planned += 1
         for name, count in stale.items():
             log.warning("%s: %d subjects wait on stale upstreams; not planned", name, count)
+        overdue = self._overdue(repositories, now)
         log.info("tick planned %d orders, routed %d repositories", planned, routed)
-        return TickReport(planned=planned, routed=routed, unrouted=unrouted, stale=stale)
+        return TickReport(
+            planned=planned, routed=routed, unrouted=unrouted, stale=stale, overdue=overdue
+        )
+
+    def _overdue(self, repositories: Collection[UUID], now: datetime) -> dict[AssetName, int]:
+        """Subjects past `freshness.fail` since their last materialization (or never made)."""
+        overdue = {}
+        for name, spec in self._pack.assets.items():
+            if spec.freshness.fail is None:
+                continue
+            subjects = set(repositories) if spec.partitions else {None}
+            fresh = self._ops.subjects(name, MATERIALIZED, now - spec.freshness.fail)
+            if count := len(subjects - fresh):
+                overdue[name] = count
+                log.warning("%s: %d subjects past freshness.fail", name, count)
+        return overdue
 
     def _route(self, now: datetime) -> tuple[int, int]:
         """Re-route only repositories whose `route_on` asset materialized since the last tick."""
         source = self._pack.route_on
         if self._router is None or self._state_of is None or source is None:
             return 0, 0
-        since = self._routed_until or now - (self._pack.assets[source].every or timedelta())
+        since = self._routed_until or now - (self._pack.assets[source].trigger.every or timedelta())
         changed = self._ops.subjects(source, MATERIALIZED, since)
         routed = unrouted = 0
         for repository_id in (r for r in changed if r is not None):
@@ -119,7 +137,7 @@ class Controller(Generic[S]):
         return routed, unrouted
 
     def _fresh(self, dep: AssetName, now: datetime) -> set[UUID | None]:
-        every = self._pack.assets[dep].every
+        every = self._pack.assets[dep].trigger.every
         return self._ops.subjects(dep, MATERIALIZED, None if every is None else now - every)
 
     def _dep_subject(self, dep: AssetName, subject: UUID | None) -> UUID | None:

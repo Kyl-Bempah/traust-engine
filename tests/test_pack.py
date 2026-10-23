@@ -7,8 +7,8 @@ import pytest
 from traust_core.v1.errors import ConfigError
 from traust_core.v1.models.operations import LaneName
 
-from traust_engine.admission import TokenBucket
-from traust_engine.pack import Pack, Partitions
+from traust_engine.ops.admission import TokenBucket
+from traust_engine.ops.pack import Pack
 
 PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
 T0 = datetime(2026, 10, 1, tzinfo=UTC)
@@ -23,9 +23,17 @@ def _write(tmp_path: Path, text: str) -> Path:
 def test_load_reads_the_engine_fields_and_ignores_the_runners() -> None:
     pack = Pack.load(PACK)
     repo_state = pack.assets["repo_state"]
-    assert (repo_state.partitions, repo_state.every) == (Partitions.REPOSITORY, timedelta(hours=24))
-    assert repo_state.quota is not None and repo_state.quota.per_hour == 2
-    assert pack.assets["dependency_graph"].every == timedelta(days=7)
+    assert (repo_state.partitions, repo_state.trigger.every) == (
+        "dynamic:repo",
+        timedelta(hours=24),
+    )
+    quota = repo_state.admission.quota
+    assert (
+        quota is not None
+        and quota.per_hour == 2
+        and quota.bucket("github.com") == "forge:github.com"
+    )
+    assert pack.assets["dependency_graph"].trigger.every == timedelta(days=7)
     assert pack.asset_for_lane(LaneName("diff-scan-quarterly")) == "diff_scan"
 
 
@@ -46,12 +54,23 @@ def test_a_lane_no_asset_runs_is_a_config_error() -> None:
     [
         "a: {deps: [missing]}",
         "a: {deps: [b]}\n  b: {deps: [a]}",
-        "a: {lanes: [x]}\n  b: {lanes: [x]}",
-        "a: {every: soon}",
-        "a: {quota: {per_hour: 0}}",
-        "a: {per_tick: 0}",
+        "a: {trigger: {lanes: [x]}}\n  b: {trigger: {lanes: [x]}}",
+        "a: {trigger: {every: soon}}",
+        "a: {admission: {quota: {key: k, per_hour: 0}}}",
+        "a: {admission: {pacing: {per_tick: 0}}}",
+        "a: {trigger: {evry: 24h}}",
+        "a: {partitions: repository}",
     ],
-    ids=["unknown dep", "cycle", "shared lane", "bad duration", "zero quota", "zero pacing"],
+    ids=[
+        "unknown dep",
+        "cycle",
+        "shared lane",
+        "bad duration",
+        "zero quota",
+        "zero pacing",
+        "misspelt key (schema)",
+        "unknown partitioning (schema)",
+    ],
 )
 def test_an_inconsistent_pack_is_a_config_error(tmp_path: Path, assets: str) -> None:
     with pytest.raises(ConfigError):

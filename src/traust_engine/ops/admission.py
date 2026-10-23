@@ -24,7 +24,7 @@ from traust_core.v1.models.operations import (
 from traust_core.v1.providers.clock import Clock
 from traust_core.v1.services.operations import OpsService, SpendService
 
-from traust_engine.pack import AssetSpec, Pack, Quota
+from traust_engine.ops.pack import AssetSpec, Pack, Quota
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class Admission:
         self._ops = ops
         self._spend = spend
         self._clock = clock
-        self._buckets: dict[tuple[AssetName, str], TokenBucket] = {}
+        self._buckets: dict[str, TokenBucket] = {}
 
     def admit(self, hosts: Mapping[UUID, str]) -> AdmissionReport:
         """Admit, hold for approval, withhold (budget) or defer (pacing, quota) each planned
@@ -76,14 +76,15 @@ class Admission:
         for order in sorted(planned, key=lambda o: (o.priority, o.created_at)):
             asset = AssetName(order.asset)
             spec = self._pack.assets.get(asset)
+            pacing, quota = (spec.admission.pacing, spec.admission.quota) if spec else (None, None)
             if spec is None or self._over_budget(order, spec, budgets, committed):
                 self._ops.withhold(order.id, BUDGET_REASON if spec else NOT_IN_PACK_REASON)
                 report["withheld"] += 1
-            elif (spec.per_tick is not None and paced[asset] >= spec.per_tick) or (
-                spec.quota is not None and not self._token(asset, spec.quota, order, hosts, now)
+            elif (pacing and paced[asset] >= pacing.per_tick) or (
+                quota and not self._token(quota, order, hosts, now)
             ):
                 report["deferred"] += 1
-            elif spec.approval:
+            elif spec.admission.approval:
                 self._ops.request_approval(order.id)
                 paced[asset] += 1
                 report["awaiting_approval"] += 1
@@ -105,7 +106,8 @@ class Admission:
         committed: Counter[LaneName],
     ) -> bool:
         """The tick's orders share the lane budget in priority order; unknown cost never binds."""
-        if order.lane is None or spec.estimate_usd is None:
+        estimate = spec.admission.estimate_usd
+        if order.lane is None or estimate is None:
             return False
         lane = LaneName(order.lane)
         if lane not in budgets:
@@ -114,21 +116,14 @@ class Admission:
         if base.budget_usd is None or base.enforcement is None:
             return False
         budget = Budget(lane=lane, monthly_usd=base.budget_usd, enforcement=base.enforcement)
-        if budget.verdict(base.spent_usd, committed[lane] + spec.estimate_usd).binding:
+        if budget.verdict(base.spent_usd, committed[lane] + estimate).binding:
             return True
-        committed[lane] += spec.estimate_usd
+        committed[lane] += estimate
         return False
 
     def _token(
-        self,
-        asset: AssetName,
-        quota: Quota,
-        order: RunOrder,
-        hosts: Mapping[UUID, str],
-        now: datetime,
+        self, quota: Quota, order: RunOrder, hosts: Mapping[UUID, str], now: datetime
     ) -> bool:
         host = hosts.get(order.repository_id, "") if order.repository_id else ""
-        bucket = self._buckets.setdefault(
-            (asset, host), TokenBucket(quota.per_hour, quota.per_hour, now)
-        )
-        return bucket.take(now)
+        full = TokenBucket(quota.per_hour, quota.per_hour, now)
+        return self._buckets.setdefault(quota.bucket(host), full).take(now)

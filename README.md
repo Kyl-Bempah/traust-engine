@@ -13,6 +13,7 @@ app CLI. Import as `traust_engine`.
 | `traust_engine.sweep.calibration` | Rule-pack calibration library API |
 | `traust_engine.adapters` | Scanner adapters (gitleaks, opengrep, …) |
 | `traust_engine.reporting` | Report validation, SARIF, render |
+| `traust_engine.ops` | Continuous ops: `Pack` (the pack's `assets.yaml`, checked against contracts `config/v1/pack`), the tick, admission and the reaper (`EngineLoop.run_once`), all through traust-core services |
 
 Rule packs ship under `data/secure-code-audit/` (`opengrep-rules/`,
 `gitleaks-rules/`). This library ships **no configuration files and never loads

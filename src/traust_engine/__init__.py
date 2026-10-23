@@ -1,7 +1,7 @@
 """Harness Engine — processing core for the AI security harness.
 
 Submodules:
-    loop        — continuous ops: pack spec, controller (tick), admission, reaper
+    ops         — continuous ops: pack spec, controller (tick), admission, reaper
     corpus      — population management (discovery, identity, dedup)
     metrics     — hash-chained metrics recording + spend tracking
     portfolio   — source-code dependency graph analysis
@@ -17,8 +17,7 @@ Submodules:
 
 from traust_engine.assets import harness_version as _harness_version
 from traust_engine.engine import HarnessEngine
-from traust_engine.loop import EngineLoop
-from traust_engine.pack import Pack
+from traust_engine.ops import EngineLoop, Pack
 
 #: Engine version from installed package metadata (pyproject) — never a hardcoded
 #: string that drifts from the wheel. Falls back to "0.0.0" in an uninstalled

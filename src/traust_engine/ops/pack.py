@@ -1,18 +1,18 @@
-"""A workload pack's asset graph, as the engine reads it from the pack's `assets.yaml`."""
+"""A workload pack's asset graph: `assets.yaml`, checked against contracts' `config/v1/pack`."""
 
 from __future__ import annotations
 
 import re
 from datetime import timedelta
 from decimal import Decimal
-from enum import StrEnum
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import pydantic
 import yaml
-from traust_core.v1.errors import ConfigError
+from traust_core.v1 import contracts
+from traust_core.v1.errors import ConfigError, DocumentError
 from traust_core.v1.models.base import Dto
 from traust_core.v1.models.operations import AssetName, LaneName
 
@@ -29,27 +29,45 @@ def _duration(value: object) -> object:
 Duration = Annotated[timedelta, pydantic.BeforeValidator(_duration)]
 
 
-class Partitions(StrEnum):
-    REPOSITORY = "repository"
+class Trigger(Dto):
+    every: Duration | None = None
+    lanes: tuple[LaneName, ...] = ()
+
+
+class Freshness(Dto):
+    warn: Duration | None = None
+    fail: Duration | None = None
+
+
+class Pacing(Dto):
+    per_tick: int
 
 
 class Quota(Dto):
-    """Forge calls allowed per host per hour; the bucket lives in the engine, not the database."""
+    """A token bucket the engine keeps in memory; `{host}` in the key is the forge host."""
 
-    per_hour: int = pydantic.Field(gt=0)
+    key: str
+    per_hour: int
+
+    def bucket(self, host: str) -> str:
+        return self.key.replace("{host}", host)
 
 
-# Dto: the pack's YAML carries fields for runners and materializers that the engine doesn't read.
-class AssetSpec(Dto):
-    partitions: Partitions | None = None
-    deps: tuple[AssetName, ...] = ()
-    every: Duration | None = None
-    lanes: tuple[LaneName, ...] = ()
-    priority: int = 100
+class Admission(Dto):
+    approval: str | None = None
     estimate_usd: Decimal | None = None
-    per_tick: int | None = pydantic.Field(default=None, gt=0)
+    pacing: Pacing | None = None
     quota: Quota | None = None
-    approval: bool = False
+
+
+# Dto: runner fields (run, params, runner, model, ...) are in the schema but not read here.
+class AssetSpec(Dto):
+    partitions: Literal["dynamic:repo"] | None = None
+    deps: tuple[AssetName, ...] = ()
+    priority: int = 100
+    trigger: Trigger = Trigger()
+    freshness: Freshness = Freshness()
+    admission: Admission = Admission()
 
 
 class Pack(Dto):
@@ -62,13 +80,13 @@ class Pack(Dto):
         names = set(self.assets)
         if unknown := {d for a in self.assets.values() for d in a.deps} - names:
             raise ValueError(f"deps name unknown assets: {sorted(unknown)}")
-        lanes = [lane for a in self.assets.values() for lane in a.lanes]
+        lanes = [lane for a in self.assets.values() for lane in a.trigger.lanes]
         if len(lanes) != len(set(lanes)):
             raise ValueError(f"a lane belongs to one asset: {sorted(lanes)}")
         if self.route_on is not None and (
-            self.route_on not in names or self.assets[self.route_on].every is None
+            self.route_on not in names or self.assets[self.route_on].trigger.every is None
         ):
-            raise ValueError(f"route_on {self.route_on!r} must be an asset with a cadence")
+            raise ValueError(f"route_on {self.route_on!r} must be an asset with trigger.every")
         try:
             self.topo_order()
         except CycleError as e:
@@ -79,7 +97,7 @@ class Pack(Dto):
         return list(TopologicalSorter({n: a.deps for n, a in self.assets.items()}).static_order())
 
     def asset_for_lane(self, lane: LaneName) -> AssetName:
-        found = next((n for n, a in self.assets.items() if lane in a.lanes), None)
+        found = next((n for n, a in self.assets.items() if lane in a.trigger.lanes), None)
         if found is None:
             raise ConfigError(f"pack {self.pack}: no asset runs lane {lane!r}")
         return found
@@ -87,6 +105,8 @@ class Pack(Dto):
     @classmethod
     def load(cls, path: Path) -> Pack:
         try:
-            return cls.model_validate(yaml.safe_load(path.read_text()))
-        except (OSError, yaml.YAMLError, pydantic.ValidationError) as e:
+            raw = yaml.safe_load(path.read_text())
+            contracts.validate_config("pack", raw)
+            return cls.model_validate(raw)
+        except (OSError, yaml.YAMLError, DocumentError, pydantic.ValidationError) as e:
             raise ConfigError(f"{path}: {e}") from e
