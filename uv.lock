@@ -1470,6 +1470,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728", size = 31274, upload-time = "2026-05-21T19:54:35.362Z" },
 ]
 
+[package.optional-dependencies]
+crypto = [
+    { name = "cryptography" },
+]
+
 [[package]]
 name = "pyopenssl"
 version = "26.4.0"
@@ -2014,7 +2019,7 @@ wheels = [
 [[package]]
 name = "traust-contracts"
 version = "0.0.0"
-source = { git = "https://github.com/traust-security/traust-contracts.git?rev=7e06d1d25f2df846dbd2e69a935a870bbccbf441#7e06d1d25f2df846dbd2e69a935a870bbccbf441" }
+source = { git = "https://github.com/traust-security/traust-contracts.git?rev=fb55ac43a7a275f3458006b3c893c4ad4f89f5ed#fb55ac43a7a275f3458006b3c893c4ad4f89f5ed" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
@@ -2024,10 +2029,11 @@ dependencies = [
 [[package]]
 name = "traust-core"
 version = "0.1.0"
-source = { git = "https://github.com/traust-security/traust-core.git?rev=92eb766ac7a878332cbf4894dd2095568c83e762#92eb766ac7a878332cbf4894dd2095568c83e762" }
+source = { git = "https://github.com/traust-security/traust-core.git?rev=7e88d812327131463ced7669e72139cfe96aeb81#7e88d812327131463ced7669e72139cfe96aeb81" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pyyaml" },
     { name = "referencing" },
     { name = "sqlalchemy" },
@@ -2089,7 +2095,7 @@ requires-dist = [
     { name = "referencing" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.2" },
     { name = "sigstore", marker = "extra == 'signing'", specifier = ">=4.0,<5.0" },
-    { name = "traust-core", git = "https://github.com/traust-security/traust-core.git?rev=92eb766ac7a878332cbf4894dd2095568c83e762" },
+    { name = "traust-core", git = "https://github.com/traust-security/traust-core.git?rev=7e88d812327131463ced7669e72139cfe96aeb81" },
     { name = "tree-sitter", marker = "extra == 'graph'" },
     { name = "tree-sitter-go", marker = "extra == 'graph'" },
     { name = "tree-sitter-javascript", marker = "extra == 'graph'" },
@@ -2110,7 +2116,7 @@ dev = [
 [[package]]
 name = "traust-ledger"
 version = "0.0.0"
-source = { git = "https://github.com/traust-security/traust-ledger.git?rev=7f34ff61ddd6f1b868c85cae6c5a466d3d6c6bb4#7f34ff61ddd6f1b868c85cae6c5a466d3d6c6bb4" }
+source = { git = "https://github.com/traust-security/traust-ledger.git?rev=461f00d1a935f50c0f504e0694b258873d12ccfe#461f00d1a935f50c0f504e0694b258873d12ccfe" }
 
 [[package]]
 name = "tree-sitter"
