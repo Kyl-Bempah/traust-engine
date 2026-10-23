@@ -81,7 +81,9 @@ class Controller(Generic[S]):
                     stale[name] = stale.get(name, 0) + 1
                     continue
                 self._ops.plan(
-                    OrderRequest(asset=name, priority=spec.priority, repository_id=subject), ENGINE
+                    OrderRequest(asset=name, priority=spec.priority, repository_id=subject),
+                    ENGINE,
+                    self._pack.config(),
                 )
                 planned += 1
         for name, count in stale.items():
@@ -131,7 +133,7 @@ class Controller(Generic[S]):
                     lane=route.lane,
                     rule=route.reason,
                 )
-                self._ops.plan(request, ENGINE)
+                self._ops.plan(request, ENGINE, self._pack.config())
             routed += 1
         self._routed_until = now
         return routed, unrouted

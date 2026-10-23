@@ -14,7 +14,9 @@ import yaml
 from traust_core.v1 import contracts
 from traust_core.v1.errors import ConfigError, DocumentError
 from traust_core.v1.models.base import Dto
-from traust_core.v1.models.operations import AssetName, LaneName
+from traust_core.v1.models.common import Sha256
+from traust_core.v1.models.integrity import sha256_hex
+from traust_core.v1.models.operations import AssetName, ConfigDigest, LaneName
 
 _DURATION = re.compile(r"^(\d+)([mhd])$")
 _UNITS = {"m": "minutes", "h": "hours", "d": "days"}
@@ -74,6 +76,7 @@ class Pack(Dto):
     pack: str
     route_on: AssetName | None = None
     assets: dict[AssetName, AssetSpec]
+    digest: Sha256 | None = None  # sha256 of the file's bytes, set by `load`: the pack version
 
     @pydantic.model_validator(mode="after")
     def _graph(self) -> Pack:
@@ -96,6 +99,14 @@ class Pack(Dto):
     def topo_order(self) -> list[AssetName]:
         return list(TopologicalSorter({n: a.deps for n, a in self.assets.items()}).static_order())
 
+    def config(self) -> tuple[ConfigDigest, ...]:
+        """The pack version, for each order's run manifest; none for a pack not read from a file."""
+        return (
+            ()
+            if self.digest is None
+            else (ConfigDigest(name=f"pack:{self.pack}", digest=self.digest),)
+        )
+
     def asset_for_lane(self, lane: LaneName) -> AssetName:
         found = next((n for n, a in self.assets.items() if lane in a.trigger.lanes), None)
         if found is None:
@@ -105,8 +116,9 @@ class Pack(Dto):
     @classmethod
     def load(cls, path: Path) -> Pack:
         try:
-            raw = yaml.safe_load(path.read_text())
+            data = path.read_bytes()
+            raw = yaml.safe_load(data)
             contracts.validate_config("pack", raw)
-            return cls.model_validate(raw)
+            return cls.model_validate(raw).model_copy(update={"digest": sha256_hex(data)})
         except (OSError, yaml.YAMLError, DocumentError, pydantic.ValidationError) as e:
             raise ConfigError(f"{path}: {e}") from e
