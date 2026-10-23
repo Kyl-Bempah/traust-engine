@@ -11,7 +11,7 @@ help:
 	@echo "  make hooks          — git config core.hooksPath .githooks"
 	@echo "  make lint           — ruff check + format --check"
 	@echo "  make lint-fix       - ruff --fix"
-	@echo "  make test           — pytest unit tests (excludes integration)"
+	@echo "  make test           — pytest unit tests, excludes integration (parallel via pytest-xdist)"
 	@echo "  make check-release  — VERSION + CHANGELOG gate for current branch vs main"
 	@echo "  make status         — current version, tag, git state"
 	@echo "  make bump patch|minor|major — bump VERSION + pyproject.toml"
@@ -35,7 +35,7 @@ lint-fix:
 	uv run ruff format .
 
 test:
-	uv run pytest tests/ -q -m "not integration"
+	uv run pytest tests/ -q -n auto -m "not integration"
 
 check-release:
 	@base="$${RELEASE_BASE:-origin/main}"; \
