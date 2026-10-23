@@ -70,56 +70,63 @@ class Admission:
         now = self._clock.now()
         planned = every_item(lambda p: self._ops.list(OrderFilter(states=(OrderState.PLANNED,)), p))
         budgets: dict[LaneName, BudgetVerdict] = {}
-        committed: Counter[LaneName] = Counter()
+        committed: dict[LaneName, Decimal] = {}
         paced: Counter[AssetName] = Counter()
         report = Counter[str]()
         for order in sorted(planned, key=lambda o: (o.priority, o.created_at)):
             asset = AssetName(order.asset)
             spec = self._pack.assets.get(asset)
-            pacing, quota = (spec.admission.pacing, spec.admission.quota) if spec else (None, None)
-            if spec is None or self._over_budget(order, spec, budgets, committed):
-                self._ops.withhold(order.id, BUDGET_REASON if spec else NOT_IN_PACK_REASON)
+            if spec is None:
+                self._ops.withhold(order.id, NOT_IN_PACK_REASON)
                 report["withheld"] += 1
-            elif (pacing and paced[asset] >= pacing.per_tick) or (
+                continue
+            verdict = self._verdict(order, spec, budgets, committed)
+            pacing, quota = spec.admission.pacing, spec.admission.quota
+            if verdict is not None and verdict.binding:
+                self._ops.withhold(order.id, BUDGET_REASON, verdict)
+                report["withheld"] += 1
+                continue
+            if (pacing and paced[asset] >= pacing.per_tick) or (
                 quota and not self._token(quota, order, hosts, now)
             ):
                 report["deferred"] += 1
-            elif spec.admission.approval:
+                continue
+            if spec.admission.approval:
                 self._ops.request_approval(order.id)
-                paced[asset] += 1
                 report["awaiting_approval"] += 1
             else:
-                self._ops.admit(order.id)
-                paced[asset] += 1
+                self._ops.admit(order.id, verdict)
                 report["admitted"] += 1
+            paced[asset] += 1
+            if verdict is not None and verdict.estimate_usd is not None:
+                committed[verdict.lane] = verdict.estimate_usd
         if report["withheld"] or report["deferred"]:
             log.warning(
                 "admission withheld %d, deferred %d", report["withheld"], report["deferred"]
             )
         return AdmissionReport(**report)
 
-    def _over_budget(
+    def _verdict(
         self,
         order: RunOrder,
         spec: AssetSpec,
         budgets: dict[LaneName, BudgetVerdict],
-        committed: Counter[LaneName],
-    ) -> bool:
-        """The tick's orders share the lane budget in priority order; unknown cost never binds."""
+        committed: Mapping[LaneName, Decimal],
+    ) -> BudgetVerdict | None:
+        """This order's verdict on top of what the tick already admitted in its lane; orders
+        share the lane budget in priority order, and unknown cost never binds."""
         estimate = spec.admission.estimate_usd
         if order.lane is None or estimate is None:
-            return False
+            return None
         lane = LaneName(order.lane)
         if lane not in budgets:
             budgets[lane] = self._spend.check_budget(lane, Decimal(0))
         base = budgets[lane]
+        total = committed.get(lane, Decimal(0)) + estimate
         if base.budget_usd is None or base.enforcement is None:
-            return False
+            return base.model_copy(update={"estimate_usd": total})
         budget = Budget(lane=lane, monthly_usd=base.budget_usd, enforcement=base.enforcement)
-        if budget.verdict(base.spent_usd, committed[lane] + estimate).binding:
-            return True
-        committed[lane] += estimate
-        return False
+        return budget.verdict(base.spent_usd, total)
 
     def _token(
         self, quota: Quota, order: RunOrder, hosts: Mapping[UUID, str], now: datetime

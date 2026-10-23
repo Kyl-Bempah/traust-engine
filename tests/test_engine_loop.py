@@ -3,6 +3,8 @@ cadence, budget, approval, pacing and the reaper."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,7 @@ import yaml
 from traust_core.v1.context import Config, Context
 from traust_core.v1.context.context import Services
 from traust_core.v1.errors import NotFoundError
+from traust_core.v1.models.artifacts import RunManifestArtifact
 from traust_core.v1.models.common import every_item
 from traust_core.v1.models.operations import (
     JobResult,
@@ -24,6 +27,7 @@ from traust_core.v1.models.operations import (
     WorkerId,
 )
 from traust_core.v1.models.values import HttpsRepoUrl
+from traust_core.v1.services.artifact_publishing import PublishSpec, PublishSpecs
 
 from traust_engine.ops.controller import ENGINE, Controller
 from traust_engine.ops.loop import EngineLoop
@@ -327,3 +331,55 @@ def test_assets_sharing_a_quota_key_share_one_bucket(tmp_path: Path) -> None:
     )
     report = EngineLoop(services, clock, pack).run_once()
     assert (report.admission.admitted, report.admission.deferred) == (3, 2)  # feeds + 2 forge calls
+
+
+def _manifest(ctx: Context, order: RunOrder) -> dict[str, Any]:
+    assert order.artifact_id is not None
+    publisher = ctx.artifact_publisher(PublishSpecs(PublishSpec(RunManifestArtifact)))
+    return json.loads(publisher.get(order.artifact_id).payload)
+
+
+def test_every_planned_order_records_the_pack_version(tmp_path: Path) -> None:
+    clock = Clock()
+    ctx = _context(tmp_path, clock)
+    services = ctx.services()
+    _repositories(services, 2)
+    pack = Pack.load(PACK)
+    EngineLoop(services, clock, pack).run_once()
+    orders = _orders(services, OrderState.QUEUED, OrderState.PLANNED)
+    assert len({o.artifact_id for o in orders}) == 1  # one shared manifest for the tick
+    digest = hashlib.sha256(PACK.read_bytes()).hexdigest()
+    assert pack.digest == digest
+    assert _manifest(ctx, orders[0])["config"] == [{"name": "pack:security", "digest": digest}]
+
+
+def test_admission_records_the_lane_verdict_and_deferred_orders_spend_nothing(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    budget = {"lane": "diff-scan", "monthly_usd": "3", "enforcement": "advisory"}
+    ctx = _context(tmp_path, clock, budgets=[budget])
+    services = ctx.services()
+    first, second, third = _repositories(services, 3)
+    for priority, repo in ((1, first), (2, second), (3, third)):
+        services.ops.plan(
+            OrderRequest(
+                asset="diff_scan", priority=priority, repository_id=repo, lane="diff-scan"
+            ),
+            ENGINE,
+        )
+    pack = _pack(
+        tmp_path, diff_scan={"admission": {"estimate_usd": "1.50", "pacing": {"per_tick": 1}}}
+    )
+    report = EngineLoop(services, clock, pack).run_once()
+    assert report.admission.withheld == 0  # deferred orders didn't spend the lane budget
+    scans = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "diff_scan"]
+    assert [o.repository_id for o in scans] == [first]
+    assert _manifest(ctx, scans[0])["budget"] == {
+        "lane": "diff-scan",
+        "status": "within",
+        "enforcement": "advisory",
+        "spent_usd": "0",
+        "estimate_usd": "1.50",
+        "budget_usd": "3",
+    }
