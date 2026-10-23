@@ -10,4 +10,9 @@ Python 3.11+ library (`traust_engine`).
 - **Downstream pin:** `traust` carries a direct `[tool.uv.sources]` pin on
   this repo (`rev = "<sha>"`, not a tag). After merging here, bump the pin
   to the new commit there, `uv lock`, and run its tests before opening the PR.
+- **Merging:** `development` requires no approvals - the checks gate it. Arm
+  auto-merge instead of waiting on a click: apply the `automerge` label, or tick
+  the test checkbox in the PR body; `.github/workflows/auto-merge.yml` then runs
+  `gh pr merge --auto --merge` and the PR lands when the checks pass. Merge
+  commits only - downstream pins point at them.
 - **Setup:** `make setup` once per clone (hooks). More: [CONTRIBUTING.md](CONTRIBUTING.md), [README.md](README.md)
