@@ -1,0 +1,136 @@
+{
+  "src/traust_engine/_ops_base.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/_util/safe_exec.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/adapters/_contract_bridge.py": {
+    "contracts": 2
+  },
+  "src/traust_engine/adapters/checkov.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/adapters/gitleaks.py": {
+    "contracts": 2
+  },
+  "src/traust_engine/adapters/govulncheck.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/adapters/grype.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/adapters/joern.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/adapters/opengrep.py": {
+    "contracts": 2
+  },
+  "src/traust_engine/adapters/ops.py": {
+    "contracts": 2
+  },
+  "src/traust_engine/adapters/osv.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/adapters/yara.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/compliance/dashboard.py": {
+    "contracts": 2,
+    "database": 1
+  },
+  "src/traust_engine/compliance/ops.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/compliance/scope.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/corpus/report_store.py": {
+    "contracts": 1,
+    "database": 1
+  },
+  "src/traust_engine/corpus/resolver.py": {
+    "contracts": 2,
+    "state-file": 2
+  },
+  "src/traust_engine/engine.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/impact/analyzer.py": {
+    "contracts": 1,
+    "database": 1
+  },
+  "src/traust_engine/impact/ops.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/locations.py": {
+    "contracts": 1,
+    "state-file": 4
+  },
+  "src/traust_engine/metrics/history.py": {
+    "contracts": 2
+  },
+  "src/traust_engine/metrics/sla.py": {
+    "contracts": 1,
+    "database": 1
+  },
+  "src/traust_engine/metrics/spend.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/ops/admission.py": {
+    "core-internal": 2
+  },
+  "src/traust_engine/ops/controller.py": {
+    "core-internal": 2
+  },
+  "src/traust_engine/ops/loop.py": {
+    "core-internal": 2
+  },
+  "src/traust_engine/ops/pack.py": {
+    "core-internal": 1
+  },
+  "src/traust_engine/portfolio/graph.py": {
+    "database": 1
+  },
+  "src/traust_engine/registry/feeds.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/registry/models.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/registry/ops.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/registry/products.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/reporting/lint.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/reporting/render.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/reporting/sarif.py": {
+    "contracts": 1,
+    "state-file": 4
+  },
+  "src/traust_engine/reporting/threat_rating.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/reporting/validate.py": {
+    "contracts": 3,
+    "state-file": 3
+  },
+  "src/traust_engine/sweep/engine.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/sweep/mining.py": {
+    "state-file": 2
+  },
+  "src/traust_engine/sweep/rule_lane.py": {
+    "contracts": 1
+  },
+  "src/traust_engine/toolchain/ops.py": {
+    "contracts": 1
+  }
+}
